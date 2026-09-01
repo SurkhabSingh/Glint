@@ -1,0 +1,10 @@
+{
+  "modelId": "gemma-4-e2b",
+  "version": "361a4010ad6d88fc5c86e148e333c0342b99763d",
+  "downloadUri": "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/361a4010ad6d88fc5c86e148e333c0342b99763d/gemma-4-E2B-it.litertlm",
+  "sizeBytes": 2588147712,
+  "sha256": "181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c",
+  "runtimeVersion": "litert-lm-0.13.1",
+  "license": "Apache-2.0",
+  "fileName": "gemma-4-E2B-it.litertlm"
+}

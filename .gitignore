@@ -1,0 +1,56 @@
+# ---------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------
+bin/
+obj/
+.vs/
+TestResults/
+artifacts/
+*.user
+*.suo
+*.partial
+
+# ---------------------------------------------------------------
+# Local runtime data and model weights (multi-GB, never committed)
+# ---------------------------------------------------------------
+data/
+models/
+tools/litert/.venv/
+.phase0-*/
+
+# ---------------------------------------------------------------
+# Signing material and secrets
+# ---------------------------------------------------------------
+*.pfx
+*.cer
+*.snk
+*.p12
+*.key
+.env
+.env.*
+
+# ---------------------------------------------------------------
+# Docs: README.md is the only prose file published.
+# Working notes (roadmap, changes, SETUP, docs/, THIRD_PARTY_NOTICES)
+# stay local.
+# ---------------------------------------------------------------
+*.md
+!/README.md
+
+# ---------------------------------------------------------------
+# Text files, except the two the build genuinely needs:
+#   requirements.txt  -> provisions the LiteRT Python worker
+#   checksums.txt     -> verifies the pinned vec0.dll binary
+# ---------------------------------------------------------------
+*.txt
+!/tools/litert/requirements.txt
+!/third_party/sqlite-vec/v0.1.9/checksums.txt
+
+# ---------------------------------------------------------------
+# OS / editor noise
+# ---------------------------------------------------------------
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*~

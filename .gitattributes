@@ -1,0 +1,19 @@
+# Normalize to LF in the repository, check out native on each platform.
+* text=auto
+
+# Windows tooling is happiest with CRLF in the working tree.
+*.ps1   text eol=crlf
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+*.sln   text eol=crlf
+*.csproj text eol=crlf
+*.xaml  text eol=crlf
+
+# Binary assets — never diffed, never line-ending converted.
+*.dll    binary
+*.exe    binary
+*.png    binary
+*.tar.gz binary
+*.gguf   binary
+*.task   binary
+*.onnx   binary

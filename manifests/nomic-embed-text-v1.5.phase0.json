@@ -1,0 +1,10 @@
+{
+  "modelId": "nomic-embed-text-v1.5",
+  "version": "e9b6763023c676ca8431644204f50c2b100d9aab",
+  "downloadUri": "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/e9b6763023c676ca8431644204f50c2b100d9aab/onnx/model_int8.onnx",
+  "sizeBytes": 137296292,
+  "sha256": "b4342336debaea79de872370664b0aaeb67dea4605513d00ee236ea871a81f27",
+  "runtimeVersion": "windows-ml-1.8.2141",
+  "license": "Apache-2.0",
+  "fileName": "model_int8.onnx"
+}

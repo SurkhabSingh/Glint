@@ -1,0 +1,2 @@
+litert-lm==0.13.1
+huggingface-hub==1.18.0

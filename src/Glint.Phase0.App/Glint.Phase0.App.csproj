@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows10.0.22621.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType Condition="'$(Configuration)' == 'Debug'">None</WindowsPackageType>
+    <WindowsPackageType Condition="'$(Configuration)' == 'Release'">MSIX</WindowsPackageType>
+    <EnableMsixTooling Condition="'$(Configuration)' == 'Release'">true</EnableMsixTooling>
+    <GenerateAppxPackageOnBuild Condition="'$(Configuration)' == 'Release'">true</GenerateAppxPackageOnBuild>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishTrimmed>false</PublishTrimmed>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
+    <AppxSymbolPackageEnabled>false</AppxSymbolPackageEnabled>
+    <IncludeDebugSymbolsProjectOutputGroup Condition="'$(Configuration)' == 'Release'">false</IncludeDebugSymbolsProjectOutputGroup>
+    <AppxPackageDir>$(MSBuildProjectDirectory)\..\..\artifacts\msix\</AppxPackageDir>
+    <AppxBundle>Never</AppxBundle>
+    <GenerateAppInstallerFile>false</GenerateAppInstallerFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260317003" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Glint.Phase0.Core\Glint.Phase0.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\*.png" />
+    <Content Include="..\..\tools\litert\worker.py"
+             Link="tools\litert\worker.py"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\third_party\sqlite-vec\v0.1.9\vec0.dll"
+             Link="runtimes\win-x64\native\vec0.dll"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="RemoveDisabledMsixSymbolPayload"
+          AfterTargets="_CalculateInputsForGenerateAppxPackageRecipe"
+          BeforeTargets="_EnsurePdbCmfExeFullPath"
+          Condition="'$(AppxSymbolPackageEnabled)' != 'true'">
+    <ItemGroup>
+      <PDBPayload Remove="@(PDBPayload)" />
+    </ItemGroup>
+  </Target>
+</Project>
