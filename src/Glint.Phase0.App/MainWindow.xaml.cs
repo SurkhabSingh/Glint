@@ -2,6 +2,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using System.Runtime.InteropServices;
+using Windows.Storage.Pickers;
 using WinRT.Interop;
 
 namespace Glint.Phase0.App;
@@ -91,6 +92,32 @@ public sealed partial class MainWindow : Window
         ActivityPage.Visibility = tag == "activity" ? Visibility.Visible : Visibility.Collapsed;
         SearchPage.Visibility = tag == "search" ? Visibility.Visible : Visibility.Collapsed;
         DiagnosticsPage.Visibility = tag == "diagnostics" ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private async void ImportGemmaModel_Click(object sender, RoutedEventArgs args)
+    {
+        try
+        {
+            var picker = new FileOpenPicker
+            {
+                SuggestedStartLocation = PickerLocationId.Downloads,
+                ViewMode = PickerViewMode.List,
+            };
+            picker.FileTypeFilter.Add(".litertlm");
+            InitializeWithWindow.Initialize(picker, WindowHandle);
+            var file = await picker.PickSingleFileAsync();
+            if (file is null)
+            {
+                return;
+            }
+
+            await ViewModel.ImportGemmaModelAsync(file.Path);
+        }
+        catch (System.Exception error)
+        {
+            await ViewModel.ImportGemmaModelAsync(string.Empty);
+            System.Diagnostics.Debug.WriteLine($"Import picker failed: {error}");
+        }
     }
 
     private async void SearchBox_KeyDown(

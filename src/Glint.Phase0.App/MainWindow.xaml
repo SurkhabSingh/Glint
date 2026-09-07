@@ -79,6 +79,10 @@
                                 <Button
                                     Content="Enable borderless capture"
                                     Command="{x:Bind ViewModel.BorderlessCommand}" />
+                                <Button
+                                    Content="Import Gemma model..."
+                                    Click="ImportGemmaModel_Click"
+                                    ToolTipService.ToolTip="Pick a .litertlm Gemma model already on disk." />
                             </StackPanel>
                             <ProgressRing
                                 Width="24"

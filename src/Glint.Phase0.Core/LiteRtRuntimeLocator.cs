@@ -84,7 +84,7 @@ public static class LiteRtRuntimeLocator
 
     private static string? ReadActiveModelPath(string dataRoot)
     {
-        var pointer = Path.Combine(dataRoot, "models", "active.json");
+        var pointer = ActiveModelPointerPath(dataRoot);
         if (!File.Exists(pointer))
         {
             return null;
@@ -102,4 +102,36 @@ public static class LiteRtRuntimeLocator
             return null;
         }
     }
+
+    public static string ActiveModelPointerPath(string dataRoot) =>
+        Path.Combine(dataRoot, "models", "active.json");
+
+    public static void WriteActiveModelPath(string dataRoot, string modelPath)
+    {
+        var pointer = ActiveModelPointerPath(dataRoot);
+        Directory.CreateDirectory(Path.GetDirectoryName(pointer)!);
+        var payload = JsonSerializer.Serialize(
+            new ActiveModelPointer(
+                Path.GetFullPath(modelPath),
+                DateTimeOffset.UtcNow.ToString("O")),
+            PointerSerializerOptions);
+        File.WriteAllText(pointer, payload);
+    }
+
+    private static readonly JsonSerializerOptions PointerSerializerOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true,
+    };
+
+    public static void ClearActiveModelPath(string dataRoot)
+    {
+        var pointer = ActiveModelPointerPath(dataRoot);
+        if (File.Exists(pointer))
+        {
+            File.Delete(pointer);
+        }
+    }
+
+    private sealed record ActiveModelPointer(string Path, string ImportedAt);
 }

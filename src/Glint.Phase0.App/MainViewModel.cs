@@ -574,9 +574,57 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     private void RefreshModelStatus()
     {
         var runtime = ResolveRuntime();
-        ModelSummary = runtime.IsReady
+        var baseSummary = runtime.IsReady
             ? "Gemma 4 E2B is ready through the local LiteRT worker."
             : $"Gemma is unavailable. Missing: {string.Join(", ", runtime.Missing)}.";
+        ModelSummary = runtime.ModelPath is null
+            ? baseSummary
+            : $"{baseSummary} Model: {runtime.ModelPath}";
+    }
+
+    public async Task ImportGemmaModelAsync(string modelPath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(modelPath) || !File.Exists(modelPath))
+            {
+                ModelSummary = $"Import failed: file not found at {modelPath}.";
+                SetOverallError(ModelSummary);
+                return;
+            }
+
+            var extension = Path.GetExtension(modelPath);
+            if (!string.Equals(extension, ".litertlm", StringComparison.OrdinalIgnoreCase))
+            {
+                ModelSummary =
+                    $"Import failed: Glint's LiteRT worker only accepts .litertlm models, not "
+                    + $"'{extension}'. Download gemma-4-E2B-it.litertlm from litert-community on "
+                    + "Hugging Face.";
+                SetOverallError(ModelSummary);
+                return;
+            }
+
+            LiteRtRuntimeLocator.WriteActiveModelPath(GetDataRoot(), modelPath);
+            RefreshModelStatus();
+            var runtime = ResolveRuntime();
+            if (runtime.IsReady)
+            {
+                SetOverallSuccess($"Imported Gemma model: {runtime.ModelPath}");
+            }
+            else
+            {
+                SetOverallError(
+                    "Model pointer saved, but the LiteRT runtime is still incomplete: "
+                    + string.Join(", ", runtime.Missing));
+            }
+        }
+        catch (Exception error)
+        {
+            ModelSummary = $"Import failed: {error.Message}";
+            SetOverallError(ModelSummary);
+        }
+
+        await Task.CompletedTask;
     }
 
     private void LoadScanHistory()
