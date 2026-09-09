@@ -1,50 +1,130 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
+import { useState, useEffect, useCallback } from "react";
+import ColorSwitcher, {
+  defaultTheme,
+  hexToRgba,
+  presetThemes,
+  presetIndexForTheme,
+  stripPresetName,
+} from "./ColorSwitcher";
+import TitlebarMenu from "./TitlebarMenu";
 import "./App.css";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+function loadTheme() {
+  try {
+    const raw = localStorage.getItem("glint-window-theme");
+    if (raw) return { ...defaultTheme, ...JSON.parse(raw) };
+  } catch {
+    /* ignore corrupt storage */
+  }
+  return defaultTheme;
+}
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+async function getTauriWindow() {
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  return getCurrentWindow();
+}
+
+function App() {
+  const [theme, setTheme] = useState(loadTheme);
+  const [menuPos, setMenuPos] = useState(null);
+  const [panelOpen, setPanelOpen] = useState(false);
+
+  const windowBg = hexToRgba(theme.bg, theme.bgAlpha);
+  const windowBorder = hexToRgba(theme.border, theme.borderAlpha);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty("--window-bg", windowBg);
+    document.documentElement.style.setProperty("--window-border", windowBorder);
+    document.documentElement.style.setProperty("--accent-color", theme.accent);
+    localStorage.setItem("glint-window-theme", JSON.stringify(theme));
+  }, [windowBg, windowBorder, theme]);
+
+  const minimize = useCallback(async () => {
+    try {
+      (await getTauriWindow()).minimize();
+    } catch {
+      /* not running in Tauri (browser dev) */
+    }
+  }, []);
+
+  const toggleMaximize = useCallback(async () => {
+    try {
+      (await getTauriWindow()).toggleMaximize();
+    } catch {
+      /* not running in Tauri (browser dev) */
+    }
+  }, []);
+
+  const close = useCallback(async () => {
+    try {
+      (await getTauriWindow()).close();
+    } catch {
+      /* not running in Tauri (browser dev) */
+    }
+  }, []);
+
+  function openTitlebarMenu(e) {
+    e.preventDefault();
+    setMenuPos({ x: e.clientX, y: e.clientY });
+  }
+
+  function applyMenuPreset(index) {
+    setTheme(stripPresetName(presetThemes[index]));
   }
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
+    <div
+      className="window-frame"
+      style={{
+        backgroundColor: windowBg,
+        borderColor: windowBorder,
+        borderWidth: theme.borderWidth,
+      }}
+    >
+      <div
+        className="titlebar"
+        data-tauri-drag-region
+        onContextMenu={openTitlebarMenu}
       >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
+        <span className="titlebar-title" data-tauri-drag-region>
+          Glint
+        </span>
+        <div className="titlebar-controls">
+          <button className="tb-btn" onClick={minimize} title="Minimize">
+            &#8211;
+          </button>
+          <button className="tb-btn" onClick={toggleMaximize} title="Maximize">
+            &#9744;
+          </button>
+          <button className="tb-btn tb-close" onClick={close} title="Close">
+            &#10005;
+          </button>
+        </div>
+      </div>
+
+      {menuPos && (
+        <TitlebarMenu
+          position={menuPos}
+          activePreset={presetIndexForTheme(theme)}
+          onPreset={applyMenuPreset}
+          onCustomize={() => setPanelOpen(true)}
+          onMinimize={minimize}
+          onToggleMaximize={toggleMaximize}
+          onCloseWindow={close}
+          onDismiss={() => setMenuPos(null)}
         />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+      )}
+
+      <main className="container">
+        {panelOpen && (
+          <ColorSwitcher
+            value={theme}
+            onChange={setTheme}
+            onClose={() => setPanelOpen(false)}
+          />
+        )}
+      </main>
+    </div>
   );
 }
 

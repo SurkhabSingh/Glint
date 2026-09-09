@@ -1,0 +1,83 @@
+.tbmenu-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: transparent;
+}
+
+.tbmenu {
+  position: absolute;
+  width: 250px;
+  max-height: 420px;
+  overflow-y: auto;
+  background: rgba(18, 18, 28, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  user-select: none;
+}
+
+.tbmenu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: #e4e4e7;
+  font-size: 13px;
+  font-family: inherit;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.tbmenu-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.tbmenu-separator {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
+  margin: 6px 4px;
+}
+
+.tbmenu-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #9e9ea7;
+  padding: 4px 10px 6px;
+  font-weight: 500;
+}
+
+.tbmenu-presets {
+  display: flex;
+  flex-direction: column;
+}
+
+.tbmenu-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex: 0 0 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.tbmenu-name {
+  flex: 1;
+}
+
+.tbmenu-check {
+  width: 16px;
+  text-align: right;
+  color: #42a5f5;
+  font-weight: 700;
+}
+
+.tbmenu-customize {
+  color: #90caf9;
+  font-weight: 500;
+}
