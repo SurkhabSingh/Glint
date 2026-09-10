@@ -6,8 +6,17 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: "DM Sans";
+  src: url("./assets/fonts/DMSans_18pt-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+  --font-ui: "DM Sans", Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-family: var(--font-ui);
   font-size: 16px;
   line-height: 24px;
   font-weight: 400;
@@ -22,7 +31,6 @@
   -webkit-text-size-adjust: 100%;
 
   --window-bg: rgba(30, 60, 114, 0.55);
-  --window-border: rgba(42, 82, 152, 0.8);
   --accent-color: #42a5f5;
 }
 
@@ -37,17 +45,34 @@ body,
   overflow: hidden;
 }
 
-/* ---- The window itself: translucent fill + semi-transparent border ---- */
+/* ---- The window itself: OS frosted glass + translucent tint, no border ----
+   Strength knobs live in glass.css (see --window-radius, --glass-sheen-*). */
 .window-frame {
   width: 100vw;
   height: 100vh;
   box-sizing: border-box;
-  border-style: solid;
-  border-radius: 12px;
+  border: none;
+  border-radius: var(--window-radius);
   background-clip: padding-box;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
+}
+
+/* Liquid-glass top light: faint sheen over the blurred backdrop */
+.window-frame::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    var(--glass-sheen-top),
+    var(--glass-sheen-mid) 18%,
+    transparent 38%
+  );
 }
 
 /* ---- Custom titlebar (frameless window needs its own drag region) ---- */
@@ -55,23 +80,25 @@ body,
   height: 36px;
   flex: 0 0 36px;
   display: flex;
+  flex-direction: row;
   align-items: center;
   justify-content: space-between;
   padding-left: 14px;
-  background: rgba(0, 0, 0, 0.25);
+  background: var(--glass-titlebar-bg);
   user-select: none;
   cursor: default;
 }
 
 .titlebar-title {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 2px;
   font-size: 18px;
   font-weight: 600;
-  letter-spacing: 2px;
+  letter-spacing: 1px;
   color: rgba(255, 255, 255, 0.85);
-  font-family: "Fraunces";
-  src: url("./assets/fonts/Fraunces_72pt-Regular.ttf") format("truetype");
-  font-style: normal;
-  font-display: swap;
+  font-family: "Fraunces", Georgia, serif;
 }
 
 .titlebar-controls {
@@ -153,7 +180,7 @@ body,
   padding: 12px 32px;
   font-size: 14px;
   font-weight: 600;
-  font-family: inherit;
+  font-family: var(--font-ui);
   color: #ffffff;
   border-radius: 8px;
   transition: all 0.25s ease;
@@ -173,7 +200,7 @@ body,
   padding: 10px 32px;
   font-size: 14px;
   font-weight: 600;
-  font-family: inherit;
+  font-family: var(--font-ui);
   background-color: transparent;
   border-radius: 8px;
   transition: all 0.25s ease;

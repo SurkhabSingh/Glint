@@ -40,7 +40,7 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern nint OpenInputDesktop(
         uint flags,
-        [MarshalAs(UnmanagedType.Bool)] bool inherit,
+        [MarshalAs(UnmanagedType.Bool)] bool "Fraunces", Georgia, serif;,
         uint desiredAccess);
 
     [DllImport(
@@ -63,7 +63,7 @@ internal static class NativeMethods
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern nint OpenProcess(
         uint desiredAccess,
-        [MarshalAs(UnmanagedType.Bool)] bool inherit,
+        [MarshalAs(UnmanagedType.Bool)] bool "Fraunces", Georgia, serif;,
         uint processId);
 
     [DllImport("kernel32.dll")]

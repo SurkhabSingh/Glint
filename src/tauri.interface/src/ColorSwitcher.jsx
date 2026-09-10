@@ -1,47 +1,126 @@
 import "./ColorSwitcher.css";
 
+const FALLBACK_RGB = { r: 30, g: 60, b: 114 };
+
+export function isHexColor(value) {
+  return (
+    typeof value === "string" &&
+    /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(value)
+  );
+}
+
+export function clampAlpha(value, fallback) {
+  const n = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  if (typeof n !== "number" || !Number.isFinite(n)) return fallback;
+  return Math.min(1, Math.max(0, n));
+}
+
 export function hexToRgb(hex) {
-  let h = hex.replace("#", "");
-  if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+  if (!isHexColor(hex)) return FALLBACK_RGB;
+  let h = hex.slice(1);
+  if (h.length === 3)
+    h = h
+      .split("")
+      .map((c) => c + c)
+      .join("");
   const n = parseInt(h, 16);
-  if (Number.isNaN(n) || h.length !== 6) return { r: 30, g: 60, b: 114 };
+  if (Number.isNaN(n)) return FALLBACK_RGB;
   return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
 }
 
 export function hexToRgba(hex, alpha) {
   const { r, g, b } = hexToRgb(hex);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  const a = clampAlpha(alpha, 1);
+  return `rgba(${r}, ${g}, ${b}, ${a})`;
 }
 
 export const defaultTheme = {
   bg: "#1e3c72",
   bgAlpha: 0.55,
-  border: "#2a5298",
-  borderAlpha: 0.8,
-  borderWidth: 2,
   accent: "#42a5f5",
 };
 
 export const presetThemes = [
-  { name: "Ocean Blue", bg: "#1e3c72", bgAlpha: 0.55, border: "#2a5298", borderAlpha: 0.8, borderWidth: 2, accent: "#42a5f5" },
-  { name: "Sunset Orange", bg: "#b74a3e", bgAlpha: 0.55, border: "#e16450", borderAlpha: 0.8, borderWidth: 2, accent: "#ff7043" },
-  { name: "Forest Green", bg: "#2e6232", bgAlpha: 0.55, border: "#438144", borderAlpha: 0.8, borderWidth: 2, accent: "#66bb6a" },
-  { name: "Purple Violet", bg: "#5d368e", bgAlpha: 0.55, border: "#7f4eb7", borderAlpha: 0.8, borderWidth: 2, accent: "#ab47bc" },
-  { name: "Rose Pink", bg: "#a7446a", bgAlpha: 0.55, border: "#c85882", borderAlpha: 0.8, borderWidth: 2, accent: "#f06292" },
-  { name: "Slate Gray", bg: "#475569", bgAlpha: 0.55, border: "#64748b", borderAlpha: 0.8, borderWidth: 2, accent: "#90a4ae" },
-  { name: "Golden", bg: "#a27a31", bgAlpha: 0.55, border: "#c59646", borderAlpha: 0.8, borderWidth: 2, accent: "#ffd54f" },
-  { name: "Midnight", bg: "#0f172a", bgAlpha: 0.65, border: "#1e293b", borderAlpha: 0.85, borderWidth: 2, accent: "#64748b" },
+  {
+    name: "Ocean Blue",
+    bg: "#1e3c72",
+    bgAlpha: 0.55,
+    accent: "#42a5f5",
+  },
+  {
+    name: "Sunset Orange",
+    bg: "#b74a3e",
+    bgAlpha: 0.55,
+    accent: "#ff7043",
+  },
+  {
+    name: "Forest Green",
+    bg: "#2e6232",
+    bgAlpha: 0.55,
+    accent: "#66bb6a",
+  },
+  {
+    name: "Purple Violet",
+    bg: "#5d368e",
+    bgAlpha: 0.55,
+    accent: "#ab47bc",
+  },
+  {
+    name: "Rose Pink",
+    bg: "#a7446a",
+    bgAlpha: 0.55,
+    accent: "#f06292",
+  },
+  {
+    name: "Slate Gray",
+    bg: "#475569",
+    bgAlpha: 0.55,
+    accent: "#90a4ae",
+  },
+  {
+    name: "Golden",
+    bg: "#a27a31",
+    bgAlpha: 0.55,
+    accent: "#ffd54f",
+  },
+  {
+    name: "Midnight",
+    bg: "#0f172a",
+    bgAlpha: 0.65,
+    accent: "#64748b",
+  },
 ];
 
+/**
+ * Coerce any stored/partial value into a valid theme. Corrupt localStorage
+ * (or a shape from an older build) must never crash rendering.
+ */
+export function sanitizeTheme(value) {
+  const v = value && typeof value === "object" ? value : {};
+  return {
+    bg: isHexColor(v.bg) ? v.bg : defaultTheme.bg,
+    bgAlpha: clampAlpha(v.bgAlpha, defaultTheme.bgAlpha),
+    accent: isHexColor(v.accent) ? v.accent : defaultTheme.accent,
+  };
+}
+
+export function loadTheme() {
+  try {
+    return sanitizeTheme(
+      JSON.parse(localStorage.getItem("glint-window-theme")),
+    );
+  } catch {
+    return { ...defaultTheme };
+  }
+}
+
 export function presetIndexForTheme(theme) {
+  if (!theme || typeof theme !== "object") return -1;
   return presetThemes.findIndex(
     (p) =>
       p.bg === theme.bg &&
       p.bgAlpha === theme.bgAlpha &&
-      p.border === theme.border &&
-      p.borderAlpha === theme.borderAlpha &&
-      p.borderWidth === theme.borderWidth &&
-      p.accent.toLowerCase() === String(theme.accent).toLowerCase()
+      p.accent.toLowerCase() === String(theme.accent).toLowerCase(),
   );
 }
 
@@ -63,8 +142,8 @@ function ColorSwitcher({ value, onChange, onClose }) {
     onChange(stripPresetName(presetThemes[index]));
   }
 
-  const windowBg = hexToRgba(value.bg, value.bgAlpha);
-  const windowBorder = hexToRgba(value.border, value.borderAlpha);
+  const safe = sanitizeTheme(value);
+  const windowBg = hexToRgba(safe.bg, safe.bgAlpha);
 
   return (
     <div className="color-switcher-panel">
@@ -88,7 +167,10 @@ function ColorSwitcher({ value, onChange, onClose }) {
               style={{ background: hexToRgba(preset.bg, preset.bgAlpha) }}
               title={preset.name}
             >
-              <span className="preset-dot" style={{ backgroundColor: preset.accent }}></span>
+              <span
+                className="preset-dot"
+                style={{ backgroundColor: preset.accent }}
+              ></span>
             </button>
           ))}
         </div>
@@ -99,7 +181,7 @@ function ColorSwitcher({ value, onChange, onClose }) {
         <div className="color-input-row">
           <input
             type="color"
-            value={value.bg}
+            value={safe.bg}
             onChange={(e) => update({ bg: e.target.value })}
             title="Window background color"
           />
@@ -108,48 +190,14 @@ function ColorSwitcher({ value, onChange, onClose }) {
             min="0.05"
             max="1"
             step="0.01"
-            value={value.bgAlpha}
+            value={safe.bgAlpha}
             onChange={(e) => update({ bgAlpha: parseFloat(e.target.value) })}
-            title={`Opacity ${value.bgAlpha}`}
+            title={`Opacity ${safe.bgAlpha}`}
             className="alpha-slider"
           />
-          <span className="alpha-value">{Math.round(value.bgAlpha * 100)}%</span>
-        </div>
-      </div>
-
-      <div className="panel-section">
-        <label>Window border</label>
-        <div className="color-input-row">
-          <input
-            type="color"
-            value={value.border}
-            onChange={(e) => update({ border: e.target.value })}
-            title="Window border color"
-          />
-          <input
-            type="range"
-            min="0.05"
-            max="1"
-            step="0.01"
-            value={value.borderAlpha}
-            onChange={(e) => update({ borderAlpha: parseFloat(e.target.value) })}
-            title={`Opacity ${value.borderAlpha}`}
-            className="alpha-slider"
-          />
-          <span className="alpha-value">{Math.round(value.borderAlpha * 100)}%</span>
-        </div>
-        <div className="color-input-row border-width-row">
-          <span className="range-label">Width</span>
-          <input
-            type="range"
-            min="0"
-            max="8"
-            step="1"
-            value={value.borderWidth}
-            onChange={(e) => update({ borderWidth: parseInt(e.target.value, 10) })}
-            className="alpha-slider"
-          />
-          <span className="alpha-value">{value.borderWidth}px</span>
+          <span className="alpha-value">
+            {Math.round(safe.bgAlpha * 100)}%
+          </span>
         </div>
       </div>
 
@@ -158,7 +206,7 @@ function ColorSwitcher({ value, onChange, onClose }) {
         <div className="color-input-row">
           <input
             type="color"
-            value={value.accent}
+            value={safe.accent}
             onChange={(e) => update({ accent: e.target.value })}
             title="Accent color"
           />
@@ -175,7 +223,7 @@ function ColorSwitcher({ value, onChange, onClose }) {
         <label>Window preview</label>
         <div
           className="preview-box"
-          style={{ background: windowBg, borderColor: windowBorder }}
+          style={{ background: windowBg}}
         >
           <div className="preview-titlebar">
             <div className="preview-dots">
@@ -185,7 +233,7 @@ function ColorSwitcher({ value, onChange, onClose }) {
             </div>
             <span className="preview-title">glint</span>
           </div>
-          <div className="preview-content" style={{ color: value.accent }}>
+          <div className="preview-content" style={{ color: safe.accent }}>
             desktop shows through here
           </div>
         </div>

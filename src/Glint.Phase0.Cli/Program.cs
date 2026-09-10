@@ -213,6 +213,56 @@ try
             break;
         }
 
+        case "manual-scan":
+        {
+            await DelayAsync(options);
+            var resolution = LiteRtRuntimeLocator.Resolve(AppContext.BaseDirectory, dataRoot);
+            if (!resolution.IsReady)
+            {
+                throw new InvalidOperationException(
+                    $"Gemma runtime is not ready. Missing: {string.Join(", ", resolution.Missing)}.");
+            }
+
+            using var database = OpenDatabase(dataRoot, options);
+            var coordinator = new ManualScanCoordinator(
+                new ForegroundWindowInspector(),
+                new UiAutomationService(),
+                new PrivacyGate(),
+                new WindowsGraphicsCaptureService(
+                    options.ContainsKey("software-device")),
+                new DeterministicRedactor(),
+                new LiteRtActivitySummarizer(
+                    resolution.PythonExecutable!,
+                    resolution.WorkerScript!,
+                    resolution.ModelPath!,
+                    resolution.ModelId),
+                database);
+            var outcome = await coordinator.ScanAsync();
+            WriteJson(outcome, json);
+            break;
+        }
+
+        case "runtime-status":
+        {
+            var resolution = LiteRtRuntimeLocator.Resolve(AppContext.BaseDirectory, dataRoot);
+            WriteJson(resolution, json);
+            break;
+        }
+
+        case "search-context":
+        {
+            var query = options.GetValueOrDefault("query")
+                ?? throw new ArgumentException("search-context requires --query <text>.");
+            var limit = int.TryParse(options.GetValueOrDefault("limit"), out var parsedLimit)
+                ? parsedLimit
+                : 30;
+            using var database = OpenDatabase(dataRoot, options);
+            WriteJson(
+                new { query, results = database.SearchContext(query, limit) },
+                json);
+            break;
+        }
+
         case "model-probe":
         {
             var runtime = RequireOption(options, "runtime");
@@ -342,6 +392,9 @@ try
                   search --query TEXT [--data-dir PATH]
                   vector-smoke [--data-dir PATH]
                   manual-history [--limit 50] [--data-dir PATH]
+                  manual-scan [--delay 3] [--software-device] [--data-dir PATH] [--sqlite-vec PATH]
+                  runtime-status [--data-dir PATH]
+                  search-context --query TEXT [--limit 30] [--data-dir PATH]
                   model-probe --runtime PATH --model PATH
                   model-generate --python PATH --worker PATH --model PATH --prompt TEXT [--backend cpu]
                   activity-summarize --text TEXT [--process NAME] [--title TITLE]

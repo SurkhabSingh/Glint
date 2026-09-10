@@ -27,7 +27,7 @@
   background: transparent;
   color: #e4e4e7;
   font-size: 13px;
-  font-family: inherit;
+  font-family: var(--font-ui);
   text-align: left;
   padding: 8px 10px;
   border-radius: 6px;

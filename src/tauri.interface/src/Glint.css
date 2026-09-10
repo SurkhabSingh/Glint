@@ -1,0 +1,675 @@
+/* Glint dashboard — ports the WinUI 3 MainWindow layout onto the
+   translucent Tauri window. Accent follows --accent-color (theme panel). */
+
+.glint-shell {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  color: #f3f3f3;
+}
+
+/* ---- Left compact nav rail (ports NavigationView PaneDisplayMode=LeftCompact) ---- */
+.nav-rail {
+  flex: 0 0 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 0;
+  background: rgba(0, 0, 0, 0.28);
+  border-right: 1px solid rgba(255, 255, 255, 0.07);
+  user-select: none;
+}
+
+.nav-rail-btn {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 9px;
+  font-family: var(--font-ui);
+  cursor: pointer;
+  position: relative;
+}
+
+.nav-rail-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+.nav-rail-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.nav-rail-btn.active {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.nav-rail-btn.active::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent-color);
+}
+
+.nav-rail-bottom {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding-bottom: 4px;
+}
+
+/* ---- Dummy settings rows + toggles (visual only) ---- */
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+}
+
+.setting-row + .setting-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.setting-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.setting-desc {
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.62);
+  margin-top: 2px;
+  line-height: 1.5;
+}
+
+.setting-toggle {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.1);
+  cursor: pointer;
+  position: relative;
+  padding: 0;
+  transition:
+    background 0.2s,
+    border-color 0.2s;
+}
+
+.setting-toggle .setting-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.75);
+  transition:
+    left 0.2s,
+    background 0.2s;
+}
+
+.setting-toggle.on {
+  background: var(--accent-color);
+  border-color: transparent;
+}
+
+.setting-toggle.on .setting-knob {
+  left: 22px;
+  background: #fff;
+}
+
+/* ---- Page scroll area ---- */
+.glint-page {
+  flex: 1;
+  overflow-y: auto;
+  min-width: 0;
+}
+
+.glint-page-inner {
+  max-width: var(--page-max-width);
+  margin: 0 auto;
+  padding: var(--page-padding) var(--page-padding) 40px;
+}
+
+.glint-page-inner.narrow {
+  max-width: 900px;
+}
+
+.glint-title {
+  font-family: "Fraunces", Georgia, serif;
+  font-weight: 400;
+  font-size: 30px;
+  margin: 0;
+  letter-spacing: 0.5px;
+}
+
+.glint-subtitle {
+  font-size: 19px;
+  font-weight: 600;
+  margin: 10px 0 0;
+}
+
+.glint-hint {
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 13px;
+  margin: 6px 0 0;
+  line-height: 1.5;
+}
+
+.glint-section-title {
+  font-size: 19px;
+  font-weight: 600;
+  margin: 20px 0 0;
+}
+
+.glint-section-sub {
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 13px;
+  margin: 6px 0 0;
+}
+
+/* ---- Status banner (ports InfoBar) ---- */
+.status-banner {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  border: 1px solid transparent;
+}
+
+.status-banner .status-dot {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.status-banner.success {
+  background: rgba(81, 128, 0, 0.38);
+  border-color: rgba(148, 196, 60, 0.35);
+}
+
+.status-banner.success .status-dot {
+  background: #7cb342;
+}
+
+.status-banner.error {
+  background: rgba(164, 38, 44, 0.4);
+  border-color: rgba(255, 120, 120, 0.35);
+}
+
+.status-banner.error .status-dot {
+  background: #e81123;
+}
+
+.status-banner.info {
+  background: rgba(0, 90, 158, 0.35);
+  border-color: rgba(96, 205, 255, 0.3);
+}
+
+.status-banner.info .status-dot {
+  background: #0078d4;
+}
+
+.status-banner .status-title {
+  font-weight: 600;
+  margin-right: 10px;
+}
+
+/* ---- Cards (ports CardBackgroundFillColor brushes) ---- */
+.glint-card {
+  margin-top: 20px;
+  padding: 20px;
+  background: var(--card-bg);
+  border: var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-highlight), var(--card-shadow);
+  -webkit-backdrop-filter: var(--card-blur);
+  backdrop-filter: var(--card-blur);
+}
+
+.glint-card.secondary {
+  margin-top: 0;
+}
+
+.glint-card h3 {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.glint-card p {
+  font-size: 13.5px;
+  line-height: 1.55;
+  margin: 10px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.glint-card p.dim {
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.glint-btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.glint-btn {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  padding: 7px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.glint-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.glint-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.glint-btn.primary {
+  background: var(--accent-color);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+}
+
+.glint-btn.primary:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.runtime-setup {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.18);
+  box-shadow: var(--card-highlight);
+}
+
+.runtime-setup p {
+  margin-top: 0;
+}
+
+.setup-log {
+  margin-top: 10px;
+}
+
+.spinner {
+  width: 24px;
+  height: 24px;
+  margin-top: 12px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.18);
+  border-top-color: var(--accent-color);
+  animation: glint-spin 0.9s linear infinite;
+}
+
+@keyframes glint-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- Scan / search result cards ---- */
+.scan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.scan-card {
+  background: var(--card-bg);
+  border: var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-highlight), var(--card-shadow);
+  padding: 16px;
+}
+
+.scan-card .scan-time {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 12px;
+}
+
+.scan-card .scan-label {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.scan-card .scan-summary {
+  font-size: 13.5px;
+  line-height: 1.55;
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.scan-card .scan-important {
+  font-size: 13.5px;
+  font-weight: 600;
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.scan-card .scan-reminder {
+  font-size: 13.5px;
+  margin: 5px 0 0;
+  color: var(--accent-color);
+  overflow-wrap: anywhere;
+}
+
+.scan-card .scan-source {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.62);
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.scan-card .scan-metrics,
+.scan-card .scan-status {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.scan-card .scan-snippet {
+  font-family: "Mainframe";
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.62);
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+}
+
+/* Diagnostics expander (ports Expander) */
+.scan-expander {
+  margin-top: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.18);
+  box-shadow: var(--card-highlight);
+}
+
+.scan-expander summary {
+  padding: 9px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scan-expander summary::-webkit-details-marker {
+  display: none;
+}
+
+.scan-expander summary::before {
+  content: "›";
+  display: inline-block;
+  transition: transform 0.15s;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.scan-expander[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.scan-expander summary:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.scan-expander-body {
+  padding: 4px 12px 12px;
+  font-size: 13px;
+}
+
+.scan-expander-body .mono {
+  font-family: "Mainframe";
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.scan-expander-body .scroll {
+  max-height: 240px;
+  overflow-y: auto;
+  margin-top: 6px;
+}
+
+.scan-expander-body .scroll.short {
+  max-height: 180px;
+}
+
+.scan-expander-body h5 {
+  font-size: 13px;
+  margin: 12px 0 0;
+}
+
+/* ---- Search page ---- */
+.search-box-card {
+  margin-top: 20px;
+  padding: 12px;
+  background: var(--card-bg);
+  border: var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-highlight), var(--card-shadow);
+  -webkit-backdrop-filter: var(--card-blur);
+  backdrop-filter: var(--card-blur);
+  display: flex;
+  gap: 10px;
+}
+
+.search-box-card input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  color: #fff;
+  font-family: "Fraunces", Georgia, serif;
+  font-size: 16px;
+  letter-spacing: 1px;
+  padding: 9px 14px;
+  outline: none;
+}
+
+.search-box-card input:focus {
+  border-color: var(--accent-color);
+}
+
+.search-box-card input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* ---- Diagnostics page ---- */
+.diag-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 20px;
+}
+
+@media (max-width: 760px) {
+  .diag-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.diag-grid .glint-card {
+  margin-top: 0;
+}
+
+.compat-lines {
+  font-family:"Mainframe";
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 10px 0 0;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.glint-footnote {
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 13px;
+  line-height: 1.55;
+  margin: 20px 0 0;
+}
+
+/* ---- Floating command bar window ---- */
+.cmdbar {
+  width: 100vw;
+  height: 100vh;
+  box-sizing: border-box;
+  border: none;
+  border-radius: var(--cmdbar-radius);
+  background-clip: padding-box;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  color: #f3f3f3;
+  overflow: hidden;
+}
+
+.cmdbar-grip {
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+}
+
+.cmdbar-grip span {
+  width: 42px;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.cmdbar-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cmdbar-badge {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--accent-color);
+  color: #fff;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cmdbar-input-row input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: #fff;
+  font-family: var(--font-ui);
+  font-size: 18px;
+  outline: none;
+}
+
+.cmdbar-input-row input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.cmdbar-enter {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12px;
+}
+
+.cmdbar-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.cmdbar-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cmdbar-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: none;
+  background: transparent;
+  color: #f3f3f3;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.cmdbar-suggestion:hover,
+.cmdbar-suggestion.selected {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.cmdbar-suggestion .glyph {
+  width: 26px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.cmdbar-hint {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12px;
+  margin-top: auto;
+}

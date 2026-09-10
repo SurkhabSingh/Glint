@@ -1,0 +1,110 @@
+/* =====================================================================
+   GLASS TUNING — the one file for blur/glass strength.
+   Companion: `src-tauri/src/glass.rs` (`tuning` module) drives the OS
+   compositor side (acrylic tint band). Everything paintable lives here
+   as variables; change the value, keep the name.
+   ---------------------------------------------------------------------
+   --window-radius      Frame corner rounding. 0px = flush square window
+                        (no transparent corner insets). Raise for a
+                        floating look (the command bar uses its own var).
+   --glass-titlebar-bg  Darkening strip over the blurred titlebar. Raise
+                        alpha for a moodier bar, lower to let the blur
+                        breathe. Accepts any color.
+   --glass-sheen-top/mid
+                        Top-light gradient over the whole frame. Set both
+                        to `transparent` to disable the sheen.
+   --page-padding       Inner gutter of the dashboard pages.
+   --page-max-width     Content column width (auto-centered beyond it).
+   --glass-scroll-size  Scrollbar thickness.
+   --glass-scroll-thumb Colors of the frosted thumb + hover state.
+   ===================================================================== */
+
+:root {
+  --window-radius: 0px;
+  --cmdbar-radius: 16px;
+
+  --glass-titlebar-bg: rgba(0, 0, 0, 0.15);
+
+  --glass-sheen-top: rgba(255, 255, 255, 0.03);
+  --glass-sheen-mid: rgba(255, 255, 255, 0.02);
+
+  --page-padding: 28px;
+  --page-max-width: 980px;
+
+  /* ---- Content-card glass (glint-card / scan-card family only.
+     Window + titlebar glass is intentionally NOT here — see glass.rs
+     and --glass-titlebar-bg above. Neutral white-alpha layering so
+     cards sit beautifully on ANY theme tint. ---- */
+  --card-radius: 18px;
+  --card-bg: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.01),
+    rgba(255, 255, 255, 0) 42%,
+    transparent 56%,
+    rgba(0, 0, 0, 0.1)
+  ),
+  rgba(20, 22, 30, 0.55);
+  --card-border: 1px solid rgba(255, 255, 255, 0.13);
+  --card-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  --card-shadow: 0 14px 34px rgba(0, 0, 0, 0.38);
+  --card-blur: blur(22px) saturate(150%);
+
+  --glass-scroll-size: 8px;
+  --glass-scroll-thumb: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.3),
+    rgba(255, 255, 255, 0.14)
+  );
+  --glass-scroll-thumb-hover: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.45),
+    rgba(255, 255, 255, 0.22)
+  );
+  --glass-scroll-track: transparent;
+}
+
+/* ---- Liquid-glass scrollbars (Chromium/WebView2) ---- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: var(--glass-scroll-size);
+  height: var(--glass-scroll-size);
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--glass-scroll-track);
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--glass-scroll-thumb);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--glass-scroll-thumb-hover);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+}
+
+/* Smooth gliding on every scroll container */
+.glint-page,
+.compat-lines,
+.tbmenu,
+.color-switcher-panel,
+.scan-expander-body .scroll {
+  scroll-behavior: smooth;
+}

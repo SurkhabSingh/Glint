@@ -12,12 +12,29 @@
   "app": {
     "windows": [
       {
-        "title": "glint",
-        "width": 800,
-        "height": 600,
+        "label": "main",
+        "title": "Glint",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
         "transparent": true,
         "decorations": false,
         "shadow": true
+      },
+      {
+        "label": "command-bar",
+        "title": "Glint command bar",
+        "url": "index.html",
+        "width": 480,
+        "height": 420,
+        "transparent": true,
+        "decorations": false,
+        "shadow": true,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false
       }
     ],
     "security": {
@@ -33,6 +50,11 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "resources": [
+      "../../Glint.Phase0.Cli/bin/Release/net9.0-windows10.0.22621.0/*",
+      "../../../tools/litert/worker.py",
+      "../../../tools/litert/requirements.txt"
     ]
   }
 }
