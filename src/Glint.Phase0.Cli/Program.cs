@@ -147,7 +147,7 @@ try
             await DelayAsync(options);
             using var database = OpenDatabase(dataRoot, options);
             var pipeline = new CapturePipeline(
-                new ForegroundWindowInspector(),
+                new ForegroundWindowInspector(HostProcessId(options)),
                 new UiAutomationService(),
                 new PrivacyGate(),
                 new WindowsGraphicsCaptureService(),
@@ -225,7 +225,7 @@ try
 
             using var database = OpenDatabase(dataRoot, options);
             var coordinator = new ManualScanCoordinator(
-                new ForegroundWindowInspector(),
+                new ForegroundWindowInspector(HostProcessId(options)),
                 new UiAutomationService(),
                 new PrivacyGate(),
                 new WindowsGraphicsCaptureService(
@@ -405,6 +405,8 @@ try
                   model-remove-active [--data-dir PATH]
                   model-remove-version --model-id ID --version VERSION [--data-dir PATH]
 
+                --host-pid PID treats that process's windows as Glint itself
+                (probe, capture, pipeline, manual-scan); hosts pass their own PID.
                 --compatibility-known-safe is only for the shipped non-sensitive test fixture.
                 Capture commands never write image pixels to disk.
                 """);
@@ -439,9 +441,22 @@ static Phase0Database OpenDatabase(
     return Phase0Database.Open(Path.Combine(dataRoot, "memory.db"), keyStore, vec);
 }
 
+// --host-pid names the long-lived UI process (the Tauri host) so its windows
+// are treated as Glint itself rather than as capturable foreground apps.
+static int? HostProcessId(IReadOnlyDictionary<string, string> options) =>
+    options.TryGetValue("host-pid", out var value)
+    && int.TryParse(
+        value,
+        System.Globalization.NumberStyles.None,
+        System.Globalization.CultureInfo.InvariantCulture,
+        out var pid)
+    && pid > 0
+        ? pid
+        : null;
+
 static ForegroundWindowInfo? ResolveWindow(IReadOnlyDictionary<string, string> options)
 {
-    var inspector = new ForegroundWindowInspector();
+    var inspector = new ForegroundWindowInspector(HostProcessId(options));
     if (!options.TryGetValue("handle", out var value))
     {
         return inspector.Inspect();

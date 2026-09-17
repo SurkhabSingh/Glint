@@ -461,6 +461,7 @@ fn manual_scan_args(app: &AppHandle, root: &std::path::Path) -> Result<(PathBuf,
     let cli = crate::bridge::sidecar_path(app)?;
     let mut args = vec!["manual-scan".to_string()];
     args.extend(crate::bridge::db_args(app, root));
+    args.extend(crate::bridge::host_args());
     Ok((cli, args))
 }
 

@@ -127,6 +127,13 @@ pub fn sqlite_vec_arg(app: &AppHandle, cli: &std::path::Path) -> Option<String> 
     find_in_resources(app, "vec0.dll").map(|p| p.to_string_lossy().into_owned())
 }
 
+/// `--host-pid` for every verb: the CLI runs in its own short-lived process,
+/// so without this it cannot recognise this host's windows (dashboard,
+/// command bar) as Glint itself and would capture them.
+pub fn host_args() -> [String; 2] {
+    ["--host-pid".to_string(), std::process::id().to_string()]
+}
+
 pub struct SidecarOutput {
     pub exit_code: i32,
     pub json: serde_json::Value,
@@ -143,6 +150,7 @@ pub fn run_sidecar(
     let cli = sidecar_path(app)?;
     let output = std::process::Command::new(&cli)
         .args(args)
+        .args(host_args())
         .output()
         .map_err(|error| format!("Failed to launch {}: {error}", cli.display()))?;
     let code = output.status.code().unwrap_or(-1);

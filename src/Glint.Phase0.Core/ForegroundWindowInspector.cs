@@ -11,6 +11,16 @@ public interface IForegroundWindowInspector
 
 public sealed class ForegroundWindowInspector : IForegroundWindowInspector
 {
+    private readonly int? _hostProcessId;
+
+    // hostProcessId is the long-lived UI process that owns Glint's windows
+    // when this code runs in a separate short-lived process (the Tauri host
+    // spawns the CLI per action), so those windows still count as self.
+    public ForegroundWindowInspector(int? hostProcessId = null)
+    {
+        _hostProcessId = hostProcessId;
+    }
+
     public ForegroundWindowInfo? Inspect()
     {
         var handle = NativeMethods.GetForegroundWindow();
@@ -77,8 +87,12 @@ public sealed class ForegroundWindowInspector : IForegroundWindowInspector
             protectedWindow,
             secureDesktop,
             desktopDetermined,
-            processId == Environment.ProcessId);
+            IsSelfProcess(processId, Environment.ProcessId, _hostProcessId));
     }
+
+    internal static bool IsSelfProcess(uint processId, int currentProcessId, int? hostProcessId) =>
+        processId == currentProcessId
+        || (hostProcessId is { } host && processId == host);
 
     private static (bool Elevated, bool Determined) QueryElevation(uint processId)
     {
