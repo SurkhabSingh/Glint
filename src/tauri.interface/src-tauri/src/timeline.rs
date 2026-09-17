@@ -461,13 +461,37 @@ fn hook_thread() {
     }
 }
 
+/// Turn a probe attempt into a decision. Fails closed (README invariant 1:
+/// "Secure or indeterminate state suppresses capture"): if the probe was
+/// skipped or produced nothing we cannot tell whether the window is
+/// sensitive, so the row keeps its process but loses its title.
+fn resolve_probe(
+    busy: bool,
+    probed: Option<(bool, Option<String>, Option<String>)>,
+) -> (bool, Option<String>, Option<String>) {
+    if busy {
+        return (
+            false,
+            Some("ProbeUnavailable".to_string()),
+            Some("privacy probe was busy; title suppressed".to_string()),
+        );
+    }
+    probed.unwrap_or_else(|| {
+        (
+            false,
+            Some("ProbeUnavailable".to_string()),
+            Some("privacy probe returned no decision; title suppressed".to_string()),
+        )
+    })
+}
+
 /// Probe the Core privacy decision for an HWND (existing verb, no CLI change).
 /// Returns (allowed, reason_name_or_None, detail_or_None).
 fn probe_decision(app: &AppHandle, hwnd: isize) -> (bool, Option<String>, Option<String>) {
     // Bound concurrent probes so Alt-Tab storms serialize instead of piling up.
     if PROBE_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) >= 2 {
         PROBE_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
-        return (true, None, None);
+        return resolve_probe(true, None);
     }
     let result = (|| {
         let handle = hwnd.to_string();
@@ -488,7 +512,7 @@ fn probe_decision(app: &AppHandle, hwnd: isize) -> (bool, Option<String>, Option
         Some((allowed, reason, detail))
     })();
     PROBE_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
-    result.unwrap_or((true, None, None))
+    resolve_probe(false, result)
 }
 
 fn handle_switch(app: &AppHandle, hwnd: isize) {
@@ -527,22 +551,48 @@ fn handle_switch(app: &AppHandle, hwnd: isize) {
     push_row(app, row);
 }
 
+/// The title a heartbeat may record: the one from the most recent
+/// `window.focused` row for the same process, which already passed the
+/// privacy gate. Returns None when that row is for another process or had
+/// its title suppressed, so a blocked title is never revived later.
+fn heartbeat_title(log: &[serde_json::Value], process: &str) -> Option<String> {
+    log.iter()
+        .rev()
+        .find(|row| row.get("kind").and_then(|v| v.as_str()) == Some("window.focused"))
+        .filter(|row| row.get("process").and_then(|v| v.as_str()) == Some(process))
+        .and_then(|row| row.get("title").and_then(|v| v.as_str()))
+        .map(|title| title.to_string())
+}
+
 /// 30 s dwell heartbeat (called from the scan loop's heartbeat task).
 pub fn record_heartbeat(app: &AppHandle) {
     let Some(identity) = current_foreground() else {
         return;
     };
-    let dwell_ms = {
+    // Never read the live title here: this window was privacy-checked on
+    // focus, and re-reading would leak a title the gate suppressed.
+    let (dwell_ms, title) = {
         let log = session_log().lock().unwrap();
-        log.last()
+        let dwell = log
+            .last()
             .and_then(|last| last.get("ts_wall_ms").and_then(|v| v.as_i64()))
             .map(|last_ts| wall_ms() - last_ts)
-            .unwrap_or(0)
+            .unwrap_or(0);
+        (dwell, heartbeat_title(&log, &identity.process))
     };
     let mut row = base_row("heartbeat");
     row["accuracy"] = serde_json::Value::String("heartbeat".to_string());
     row["process"] = serde_json::Value::String(identity.process);
-    row["title"] = serde_json::Value::String(identity.title);
+    match title {
+        Some(title) => row["title"] = serde_json::Value::String(title),
+        None => {
+            row["title"] = serde_json::Value::Null;
+            row["suppressed"] = serde_json::Value::String("TitleNotChecked".to_string());
+            row["suppressedDetail"] = serde_json::Value::String(
+                "no privacy-checked title for this window".to_string(),
+            );
+        }
+    }
     row["dwell_ms"] = serde_json::Value::from(dwell_ms);
     push_row(app, row);
 }
@@ -570,6 +620,94 @@ pub fn start_hook(app: AppHandle) {
                 .ok();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{heartbeat_title, resolve_probe};
+    use serde_json::json;
+
+    #[test]
+    fn busy_probe_suppresses_the_title() {
+        let (allowed, reason, detail) = resolve_probe(true, None);
+        assert!(!allowed);
+        assert_eq!(reason.as_deref(), Some("ProbeUnavailable"));
+        assert!(detail.is_some());
+    }
+
+    #[test]
+    fn failed_probe_suppresses_the_title() {
+        let (allowed, reason, _) = resolve_probe(false, None);
+        assert!(!allowed);
+        assert_eq!(reason.as_deref(), Some("ProbeUnavailable"));
+    }
+
+    #[test]
+    fn probe_decision_passes_through_unchanged() {
+        let probed = Some((true, None, None));
+        assert_eq!(resolve_probe(false, probed), (true, None, None));
+
+        let denied = Some((
+            false,
+            Some("ElevatedProcess".to_string()),
+            Some("elevated".to_string()),
+        ));
+        let (allowed, reason, detail) = resolve_probe(false, denied);
+        assert!(!allowed);
+        assert_eq!(reason.as_deref(), Some("ElevatedProcess"));
+        assert_eq!(detail.as_deref(), Some("elevated"));
+    }
+
+    #[test]
+    fn heartbeat_reuses_the_last_checked_title() {
+        let log = vec![json!({
+            "kind": "window.focused",
+            "process": "Code",
+            "title": "roadmap.md - Code",
+        })];
+        assert_eq!(
+            heartbeat_title(&log, "Code").as_deref(),
+            Some("roadmap.md - Code")
+        );
+    }
+
+    #[test]
+    fn heartbeat_keeps_a_suppressed_title_suppressed() {
+        let log = vec![json!({
+            "kind": "window.focused",
+            "process": "keepass",
+            "title": serde_json::Value::Null,
+            "suppressed": "BlockedProcess",
+        })];
+        assert_eq!(heartbeat_title(&log, "keepass"), None);
+    }
+
+    #[test]
+    fn heartbeat_ignores_a_title_from_another_process() {
+        let log = vec![json!({
+            "kind": "window.focused",
+            "process": "Code",
+            "title": "roadmap.md - Code",
+        })];
+        assert_eq!(heartbeat_title(&log, "keepass"), None);
+    }
+
+    #[test]
+    fn heartbeat_looks_past_earlier_heartbeats() {
+        let log = vec![
+            json!({"kind": "window.focused", "process": "Code", "title": "roadmap.md - Code"}),
+            json!({"kind": "heartbeat", "process": "Code", "title": "roadmap.md - Code"}),
+        ];
+        assert_eq!(
+            heartbeat_title(&log, "Code").as_deref(),
+            Some("roadmap.md - Code")
+        );
+    }
+
+    #[test]
+    fn heartbeat_without_any_focus_row_has_no_title() {
+        assert_eq!(heartbeat_title(&[], "Code"), None);
+    }
 }
 
 /// Dropped-hook counter for Diagnostics honesty.
