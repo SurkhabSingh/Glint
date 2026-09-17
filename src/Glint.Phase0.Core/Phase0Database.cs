@@ -11,7 +11,7 @@ public interface ICaptureEventStore
     void Insert(RawCaptureEvent captureEvent);
 }
 
-public sealed class Phase0Database : ICaptureEventStore, IManualScanStore, IDisposable
+    public sealed class Phase0Database : ICaptureEventStore, IManualScanStore, ISessionStore, IDisposable
 {
     private static readonly Lock InitializationLock = new();
     private static bool _sqliteInitialized;
@@ -186,13 +186,13 @@ public sealed class Phase0Database : ICaptureEventStore, IManualScanStore, IDisp
                      status, error, content_hash, model_id, uia_characters,
                      ocr_characters, redactions, capture_ms, ocr_ms, inference_ms,
                      important_signals, reminder_candidate, gemma_context_characters,
-                     redacted_uia_text, redacted_ocr_text, ocr_language)
+                     redacted_uia_text, redacted_ocr_text, ocr_language, session_id)
                 VALUES
                     ($id, $capturedAt, $process, $title, $label, $summary,
                      $status, $error, $hash, $model, $uiaCharacters,
                      $ocrCharacters, $redactions, $captureMs, $ocrMs, $inferenceMs,
                      $importantSignals, $reminderCandidate, $gemmaContextCharacters,
-                     $redactedUiaText, $redactedOcrText, $ocrLanguage);
+                     $redactedUiaText, $redactedOcrText, $ocrLanguage, $sessionId);
                 """;
             command.Parameters.AddWithValue("$id", scan.Id);
             command.Parameters.AddWithValue("$capturedAt", scan.CapturedAtMilliseconds);
@@ -228,11 +228,120 @@ public sealed class Phase0Database : ICaptureEventStore, IManualScanStore, IDisp
             command.Parameters.AddWithValue(
                 "$ocrLanguage",
                 (object?)scan.OcrLanguage ?? DBNull.Value);
+            command.Parameters.AddWithValue(
+                "$sessionId",
+                (object?)scan.SessionId ?? DBNull.Value);
             command.ExecuteNonQuery();
         }
 
         transaction.Commit();
     }
+
+    public ActivitySession? GetOpenSession()
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
+                   scan_ids_json, label, summary, status, important_signals,
+                   reminder_candidate, head_text, tail_text
+            FROM activity_sessions
+            WHERE status = 'Active'
+            ORDER BY started_at_ms DESC, id DESC
+            LIMIT 1;
+            """;
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? ReadSession(reader) : null;
+    }
+
+    public void UpsertSession(ActivitySession session)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            INSERT INTO activity_sessions
+                (id, started_at_ms, ended_at_ms, process_name, window_title,
+                 scan_ids_json, label, summary, status, important_signals,
+                 reminder_candidate, head_text, tail_text)
+            VALUES
+                ($id, $startedAt, $endedAt, $process, $title,
+                 $scanIds, $label, $summary, $status, $importantSignals,
+                 $reminderCandidate, $headText, $tailText)
+            ON CONFLICT(id) DO UPDATE SET
+                ended_at_ms = excluded.ended_at_ms,
+                scan_ids_json = excluded.scan_ids_json,
+                label = excluded.label,
+                summary = excluded.summary,
+                status = excluded.status,
+                important_signals = excluded.important_signals,
+                reminder_candidate = excluded.reminder_candidate,
+                head_text = excluded.head_text,
+                tail_text = excluded.tail_text;
+            """;
+        command.Parameters.AddWithValue("$id", session.Id);
+        command.Parameters.AddWithValue("$startedAt", session.StartedAtMilliseconds);
+        command.Parameters.AddWithValue("$endedAt", session.EndedAtMilliseconds);
+        command.Parameters.AddWithValue("$process", session.ProcessName);
+        command.Parameters.AddWithValue("$title", session.WindowTitle);
+        command.Parameters.AddWithValue(
+            "$scanIds", SessionManager.SerializeScanIds(session.ScanIds));
+        command.Parameters.AddWithValue("$label", (object?)session.Label ?? DBNull.Value);
+        command.Parameters.AddWithValue("$summary", (object?)session.Summary ?? DBNull.Value);
+        command.Parameters.AddWithValue("$status", session.Status.ToString());
+        command.Parameters.AddWithValue(
+            "$importantSignals",
+            (object?)session.ImportantSignals ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$reminderCandidate",
+            (object?)session.ReminderCandidate ?? DBNull.Value);
+        command.Parameters.AddWithValue("$headText", session.HeadText);
+        command.Parameters.AddWithValue("$tailText", session.TailText);
+        command.ExecuteNonQuery();
+    }
+
+    public IReadOnlyList<ActivitySession> GetRecentSessions(int limit = 50)
+    {
+        if (limit is < 1 or > 500)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
+                   scan_ids_json, label, summary, status, important_signals,
+                   reminder_candidate, head_text, tail_text
+            FROM activity_sessions
+            ORDER BY started_at_ms DESC, id DESC
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$limit", limit);
+        using var reader = command.ExecuteReader();
+        var sessions = new List<ActivitySession>();
+        while (reader.Read())
+        {
+            sessions.Add(ReadSession(reader));
+        }
+
+        return sessions;
+    }
+
+    private static ActivitySession ReadSession(System.Data.Common.DbDataReader reader) =>
+        new(
+            reader.GetString(0),
+            reader.GetInt64(1),
+            reader.GetInt64(2),
+            reader.GetString(3),
+            reader.GetString(4),
+            SessionManager.DeserializeScanIds(reader.GetString(5)),
+            reader.IsDBNull(6) ? null : reader.GetString(6),
+            reader.IsDBNull(7) ? null : reader.GetString(7),
+            Enum.Parse<ActivitySessionStatus>(reader.GetString(8), ignoreCase: false),
+            reader.IsDBNull(9) ? null : reader.GetString(9),
+            reader.IsDBNull(10) ? null : reader.GetString(10),
+            reader.IsDBNull(11) ? string.Empty : reader.GetString(11),
+            reader.IsDBNull(12) ? string.Empty : reader.GetString(12));
 
     public bool ContainsManualScanContentHash(string contentHash)
     {
@@ -261,7 +370,7 @@ public sealed class Phase0Database : ICaptureEventStore, IManualScanStore, IDisp
                    m.redactions, m.capture_ms, m.ocr_ms, m.inference_ms,
                    m.important_signals, m.reminder_candidate,
                    m.gemma_context_characters, f.text, m.redacted_uia_text,
-                   m.redacted_ocr_text, m.ocr_language
+                   m.redacted_ocr_text, m.ocr_language, m.session_id
             FROM manual_scans AS m
             LEFT JOIN raw_events_fts AS f
               ON f.content_hash = m.content_hash
@@ -296,7 +405,8 @@ public sealed class Phase0Database : ICaptureEventStore, IManualScanStore, IDisp
                 reader.IsDBNull(19) ? null : reader.GetString(19),
                 reader.IsDBNull(20) ? null : reader.GetString(20),
                 reader.IsDBNull(21) ? null : reader.GetString(21),
-                reader.IsDBNull(22) ? null : reader.GetString(22)));
+                reader.IsDBNull(22) ? null : reader.GetString(22),
+                reader.IsDBNull(23) ? null : reader.GetString(23)));
         }
 
         return scans;
@@ -572,6 +682,7 @@ public sealed class Phase0Database : ICaptureEventStore, IManualScanStore, IDisp
         EnsureManualScanColumn("redacted_uia_text");
         EnsureManualScanColumn("redacted_ocr_text");
         EnsureManualScanColumn("ocr_language");
+        EnsureManualScanColumn("session_id");
         Execute(
             """
             INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
@@ -579,6 +690,28 @@ public sealed class Phase0Database : ICaptureEventStore, IManualScanStore, IDisp
 
             INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
             VALUES (5, CAST(unixepoch('subsec') * 1000 AS INTEGER));
+
+            CREATE TABLE IF NOT EXISTS activity_sessions (
+                id TEXT PRIMARY KEY,
+                started_at_ms INTEGER NOT NULL,
+                ended_at_ms INTEGER NOT NULL,
+                process_name TEXT NOT NULL,
+                window_title TEXT NOT NULL,
+                scan_ids_json TEXT NOT NULL DEFAULT '[]',
+                label TEXT,
+                summary TEXT,
+                status TEXT NOT NULL CHECK(status IN ('Active', 'Closed', 'OpenLoop')),
+                important_signals TEXT,
+                reminder_candidate TEXT,
+                head_text TEXT NOT NULL DEFAULT '',
+                tail_text TEXT NOT NULL DEFAULT ''
+            ) STRICT;
+
+            CREATE INDEX IF NOT EXISTS idx_activity_sessions_started_at
+            ON activity_sessions(started_at_ms DESC);
+
+            INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
+            VALUES (6, CAST(unixepoch('subsec') * 1000 AS INTEGER));
             """);
     }
 
@@ -616,6 +749,8 @@ public sealed class Phase0Database : ICaptureEventStore, IManualScanStore, IDisp
                 "ALTER TABLE manual_scans ADD COLUMN redacted_ocr_text TEXT;",
             "ocr_language" =>
                 "ALTER TABLE manual_scans ADD COLUMN ocr_language TEXT;",
+            "session_id" =>
+                "ALTER TABLE manual_scans ADD COLUMN session_id TEXT;",
             _ => throw new ArgumentOutOfRangeException(
                 nameof(columnName),
                 columnName,

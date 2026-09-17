@@ -426,7 +426,7 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 
     private static ManualScanCoordinator CreateCoordinator(
         LiteRtRuntimeResolution runtime,
-        IManualScanStore store) =>
+        Phase0Database database) =>
         new(
             new ForegroundWindowInspector(),
             new UiAutomationService(),
@@ -438,7 +438,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
                 runtime.WorkerScript!,
                 runtime.ModelPath!,
                 runtime.ModelId),
-            store);
+            database,
+            database);
 
     private async Task<ManualScanOutcome> RunScanOnceAsync(
         ManualScanCoordinator coordinator,

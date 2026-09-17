@@ -29,7 +29,8 @@ public sealed record ManualScanRecord(
     string? RedactedInputText = null,
     string? RedactedUiAutomationText = null,
     string? RedactedOcrText = null,
-    string? OcrLanguage = null);
+    string? OcrLanguage = null,
+    string? SessionId = null);
 
 public sealed record ContextSearchResult(
     string Id,
@@ -74,6 +75,37 @@ public interface IManualScanStore
     void SaveManualScan(RawCaptureEvent captureEvent, ManualScanRecord scan);
 
     IReadOnlyList<ManualScanRecord> GetRecentManualScans(int limit = 50);
+}
+
+public enum ActivitySessionStatus
+{
+    Active,
+    Closed,
+    OpenLoop
+}
+
+public sealed record ActivitySession(
+    string Id,
+    long StartedAtMilliseconds,
+    long EndedAtMilliseconds,
+    string ProcessName,
+    string WindowTitle,
+    IReadOnlyList<string> ScanIds,
+    string? Label,
+    string? Summary,
+    ActivitySessionStatus Status,
+    string? ImportantSignals = null,
+    string? ReminderCandidate = null,
+    string HeadText = "",
+    string TailText = "");
+
+public interface ISessionStore
+{
+    ActivitySession? GetOpenSession();
+
+    void UpsertSession(ActivitySession session);
+
+    IReadOnlyList<ActivitySession> GetRecentSessions(int limit = 50);
 }
 
 public interface IActivitySummarizer

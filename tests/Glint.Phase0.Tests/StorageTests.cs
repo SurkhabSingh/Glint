@@ -94,6 +94,49 @@ public sealed class StorageTests : IDisposable
         Assert.Contains("[Redacted] [OCR]", rawMatch.Snippet, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void ActivitySessionsRoundTripWithOpenSession()
+    {
+        var keyStore = new DpapiKeyStore(Path.Combine(_directory, "session-key.bin"));
+        var databasePath = Path.Combine(_directory, "session-memory.db");
+        using (var database = Phase0Database.Open(databasePath, keyStore))
+        {
+            Assert.Null(database.GetOpenSession());
+            database.UpsertSession(new(
+                "session-1",
+                1_000,
+                2_000,
+                "Code",
+                "mail",
+                ["scan-1", "scan-2"],
+                null,
+                null,
+                ActivitySessionStatus.Active,
+                null,
+                null,
+                "reply to the warranty",
+                "reply to the warranty email now"));
+            Assert.NotNull(database.GetOpenSession());
+            var open = database.GetOpenSession()!;
+            Assert.Equal("session-1", open.Id);
+            Assert.Equal(["scan-1", "scan-2"], open.ScanIds);
+            database.UpsertSession(open with
+            {
+                EndedAtMilliseconds = 3_000,
+                Label = "Warranty reply",
+                Summary = "Replied to the warranty email.",
+                Status = ActivitySessionStatus.Closed
+            });
+            Assert.Null(database.GetOpenSession());
+        }
+
+        using var reopened = Phase0Database.Open(databasePath, keyStore);
+        var session = Assert.Single(reopened.GetRecentSessions());
+        Assert.Equal("Warranty reply", session.Label);
+        Assert.Equal(ActivitySessionStatus.Closed, session.Status);
+        Assert.Equal("reply to the warranty", session.HeadText);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_directory))

@@ -12,6 +12,7 @@ public sealed class ManualScanCoordinator
     private readonly DeterministicRedactor _redactor;
     private readonly IActivitySummarizer _summarizer;
     private readonly IManualScanStore _store;
+    private readonly SessionManager? _sessions;
 
     public ManualScanCoordinator(
         IForegroundWindowInspector windowInspector,
@@ -20,7 +21,8 @@ public sealed class ManualScanCoordinator
         IOcrCaptureService capture,
         DeterministicRedactor redactor,
         IActivitySummarizer summarizer,
-        IManualScanStore store)
+        IManualScanStore store,
+        ISessionStore? sessions = null)
     {
         _windowInspector = windowInspector;
         _automation = automation;
@@ -29,6 +31,7 @@ public sealed class ManualScanCoordinator
         _redactor = redactor;
         _summarizer = summarizer;
         _store = store;
+        _sessions = sessions is null ? null : new SessionManager(sessions, summarizer);
     }
 
     public async Task<ManualScanOutcome> ScanAsync(
@@ -120,8 +123,26 @@ public sealed class ManualScanCoordinator
                 modelError = $"{error.GetType().Name}: {error.Message}";
             }
 
+            // Session assignment precedes persistence so the saved record
+            // already carries its session. Absent a session store (unit
+            // tests, older callers) the scan simply stays ungrouped.
+            var scanId = Guid.NewGuid().ToString("N");
+            string? sessionId = null;
+            if (_sessions is not null)
+            {
+                var tracked = await _sessions.TrackScanAsync(
+                        scanId,
+                        window.ProcessName,
+                        window.Title,
+                        capturedAt.ToUnixTimeMilliseconds(),
+                        redacted.Text,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                sessionId = tracked.SessionId;
+            }
+
             var scan = new ManualScanRecord(
-                Guid.NewGuid().ToString("N"),
+                scanId,
                 capturedAt.ToUnixTimeMilliseconds(),
                 window.ProcessName,
                 window.Title,
@@ -143,7 +164,8 @@ public sealed class ManualScanCoordinator
                 redacted.Text,
                 redactedUiAutomation.Text,
                 redactedOcr.Text,
-                ocr.RecognizerLanguage);
+                ocr.RecognizerLanguage,
+                SessionId: sessionId);
             _store.SaveManualScan(captureEvent, scan);
 
             return summary is null
