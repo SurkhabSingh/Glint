@@ -189,6 +189,16 @@ const SCAN_HOTKEYS: [(&str, &str); 3] = [
 fn shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     use std::collections::HashMap;
     use tauri_plugin_global_shortcut::Shortcut;
+    // GLINT_NO_HOTKEYS=1 registers none of them, for running Glint next to
+    // something else that owns these chords. Same plugin the code already
+    // falls back to when registration fails, so behaviour is unchanged
+    // beyond the keys themselves.
+    if std::env::var("GLINT_NO_HOTKEYS")
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false)
+    {
+        return tauri_plugin_global_shortcut::Builder::<tauri::Wry>::new().build();
+    }
     let mut ids: HashMap<u32, &'static str> = HashMap::new();
     for (name, _) in SCAN_HOTKEYS {
         if let Ok(shortcut) = name.parse::<Shortcut>() {
