@@ -244,7 +244,7 @@ public interface ICaptureEventStore
             """
             SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
                    scan_ids_json, label, summary, status, important_signals,
-                   reminder_candidate, head_text, tail_text
+                   reminder_candidate, head_text, tail_text, is_minor
             FROM activity_sessions
             WHERE status = 'Active'
             ORDER BY started_at_ms DESC, id DESC
@@ -265,11 +265,11 @@ public interface ICaptureEventStore
             INSERT INTO activity_sessions
                 (id, started_at_ms, ended_at_ms, process_name, window_title,
                  scan_ids_json, label, summary, status, important_signals,
-                 reminder_candidate, head_text, tail_text)
+                 reminder_candidate, head_text, tail_text, is_minor)
             VALUES
                 ($id, $startedAt, $endedAt, $process, $title,
                  $scanIds, $label, $summary, $status, $importantSignals,
-                 $reminderCandidate, $headText, $tailText)
+                 $reminderCandidate, $headText, $tailText, $isMinor)
             ON CONFLICT(id) DO UPDATE SET
                 ended_at_ms = excluded.ended_at_ms,
                 scan_ids_json = excluded.scan_ids_json,
@@ -279,7 +279,8 @@ public interface ICaptureEventStore
                 important_signals = excluded.important_signals,
                 reminder_candidate = excluded.reminder_candidate,
                 head_text = excluded.head_text,
-                tail_text = excluded.tail_text;
+                tail_text = excluded.tail_text,
+                is_minor = excluded.is_minor;
             """;
         command.Parameters.AddWithValue("$id", session.Id);
         command.Parameters.AddWithValue("$startedAt", session.StartedAtMilliseconds);
@@ -299,6 +300,7 @@ public interface ICaptureEventStore
             (object?)session.ReminderCandidate ?? DBNull.Value);
         command.Parameters.AddWithValue("$headText", session.HeadText);
         command.Parameters.AddWithValue("$tailText", session.TailText);
+        command.Parameters.AddWithValue("$isMinor", session.IsMinor ? 1 : 0);
         command.ExecuteNonQuery();
     }
 
@@ -314,7 +316,7 @@ public interface ICaptureEventStore
             """
             SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
                    scan_ids_json, label, summary, status, important_signals,
-                   reminder_candidate, head_text, tail_text
+                   reminder_candidate, head_text, tail_text, is_minor
             FROM activity_sessions
             ORDER BY started_at_ms DESC, id DESC
             LIMIT $limit;
@@ -344,7 +346,8 @@ public interface ICaptureEventStore
             reader.IsDBNull(9) ? null : reader.GetString(9),
             reader.IsDBNull(10) ? null : reader.GetString(10),
             reader.IsDBNull(11) ? string.Empty : reader.GetString(11),
-            reader.IsDBNull(12) ? string.Empty : reader.GetString(12));
+            reader.IsDBNull(12) ? string.Empty : reader.GetString(12),
+            !reader.IsDBNull(13) && reader.GetInt64(13) != 0);
 
     /// Captures not yet grouped into a session, oldest first: the batch the
     /// sessionizer walks.
@@ -471,9 +474,9 @@ public interface ICaptureEventStore
             """
             SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
                    scan_ids_json, label, summary, status, important_signals,
-                   reminder_candidate, head_text, tail_text
+                   reminder_candidate, head_text, tail_text, is_minor
             FROM activity_sessions
-            WHERE summary IS NULL AND status = 'Closed'
+            WHERE summary IS NULL AND status = 'Closed' AND is_minor = 0
             ORDER BY started_at_ms ASC
             LIMIT $limit;
             """;
@@ -486,6 +489,32 @@ public interface ICaptureEventStore
         }
 
         return sessions;
+    }
+
+    /// <summary>
+    /// True when this content matches the capture immediately before it.
+    /// </summary>
+    /// <remarks>
+    /// Dedup is deliberately only one capture deep. Checking the whole history
+    /// silently dropped every revisit — coming back to a screen seen an hour
+    /// ago recorded nothing — which also manufactured gaps that split
+    /// sessions. A window nobody touches still produces one capture, because
+    /// each tick matches the one before it.
+    /// </remarks>
+    public bool IsRepeatOfLastCapture(string contentHash)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT content_hash
+            FROM manual_scans
+            ORDER BY captured_at_ms DESC, id DESC
+            LIMIT 1;
+            """;
+        using var reader = command.ExecuteReader();
+        return reader.Read()
+            && !reader.IsDBNull(0)
+            && string.Equals(reader.GetString(0), contentHash, StringComparison.Ordinal);
     }
 
     private const string ManualScanContentHashExistsSql =
@@ -874,7 +903,8 @@ public interface ICaptureEventStore
                 important_signals TEXT,
                 reminder_candidate TEXT,
                 head_text TEXT NOT NULL DEFAULT '',
-                tail_text TEXT NOT NULL DEFAULT ''
+                tail_text TEXT NOT NULL DEFAULT '',
+                is_minor INTEGER NOT NULL DEFAULT 0
             ) STRICT;
 
             CREATE INDEX IF NOT EXISTS idx_activity_sessions_started_at
@@ -886,6 +916,43 @@ public interface ICaptureEventStore
             INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
             VALUES (7, CAST(unixepoch('subsec') * 1000 AS INTEGER));
             """);
+
+        // Runs after the table exists, so it only does work when upgrading a
+        // store created before this column.
+        EnsureActivitySessionColumn("is_minor");
+        Execute(
+            """
+            INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
+            VALUES (8, CAST(unixepoch('subsec') * 1000 AS INTEGER));
+            """);
+    }
+
+    private void EnsureActivitySessionColumn(string columnName)
+    {
+        // activity_sessions is created further down in the same migration
+        // block on a fresh database, so this is a no-op there and only does
+        // work when upgrading an existing store.
+        using var exists = _connection.CreateCommand();
+        exists.CommandText =
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('activity_sessions') WHERE name = $column);";
+        exists.Parameters.AddWithValue("$column", columnName);
+        if (Convert.ToInt64(
+                exists.ExecuteScalar(),
+                System.Globalization.CultureInfo.InvariantCulture) == 1)
+        {
+            return;
+        }
+
+        var sql = columnName switch
+        {
+            "is_minor" =>
+                "ALTER TABLE activity_sessions ADD COLUMN is_minor INTEGER NOT NULL DEFAULT 0;",
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(columnName),
+                columnName,
+                "Unknown activity session migration column.")
+        };
+        Execute(sql);
     }
 
     private void EnsureManualScanColumn(string columnName)

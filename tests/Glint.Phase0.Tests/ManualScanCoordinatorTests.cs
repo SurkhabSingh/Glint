@@ -326,6 +326,9 @@ public sealed class ManualScanCoordinatorTests
         public bool ContainsManualScanContentHash(string contentHash) =>
             Scans.Any(item => item.Scan.ContentHash == contentHash);
 
+        public bool IsRepeatOfLastCapture(string contentHash) =>
+            Scans.Count > 0 && Scans[^1].Scan.ContentHash == contentHash;
+
         public void SaveManualScan(RawCaptureEvent captureEvent, ManualScanRecord scan) =>
             Scans.Add((captureEvent, scan));
 

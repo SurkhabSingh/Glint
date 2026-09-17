@@ -89,12 +89,16 @@ export function sessionView(session) {
   const duration = minutes >= 1 ? `${minutes} min` : "under a minute";
   const captures = session.scanIds?.length ?? 0;
   const summarized = Boolean(session.summary);
+  const minor = Boolean(session.isMinor);
   return {
     summarized,
+    minor,
     label: session.label ?? session.windowTitle ?? session.processName,
     summary: summarized
       ? session.summary
-      : "Not summarized yet — this runs between captures.",
+      : minor
+        ? "Too little on screen to summarize."
+        : "Not summarized yet — this runs between captures.",
     important: meaningful(session.importantSignals),
     reminder: meaningful(session.reminderCandidate),
     source: session.processName,

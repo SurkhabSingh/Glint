@@ -85,11 +85,11 @@ public sealed class ManualScanCoordinator
             var redactedOcr = _redactor.Redact(ocr.Text);
             var contentHash = Convert.ToHexString(
                 SHA256.HashData(Encoding.UTF8.GetBytes(redacted.Text)));
-            if (_store.ContainsManualScanContentHash(contentHash))
+            if (_store.IsRepeatOfLastCapture(contentHash))
             {
                 return new(
                     ManualScanOutcomeKind.Unchanged,
-                    "The visible content has not changed since its last saved scan.");
+                    "The visible content has not changed since the last capture.");
             }
 
             var captureEvent = new RawCaptureEvent(

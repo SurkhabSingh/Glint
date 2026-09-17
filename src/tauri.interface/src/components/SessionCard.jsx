@@ -8,7 +8,11 @@ import { sessionView } from "../glint";
 function SessionCard({ session }) {
   const view = sessionView(session);
   return (
-    <div className={`session-card${view.summarized ? "" : " unsummarized"}`}>
+    <div
+      className={`session-card${view.summarized ? "" : " unsummarized"}${
+        view.minor ? " minor" : ""
+      }`}
+    >
       <div className="session-head">
         <span className="session-span">{view.span}</span>
         <span className="session-meta">{view.meta}</span>

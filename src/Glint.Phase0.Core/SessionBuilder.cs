@@ -12,7 +12,7 @@ public interface ISessionWorkStore : ISessionStore
     IReadOnlyList<ActivitySession> GetUnsummarizedSessions(int limit = 20);
 }
 
-public sealed record SessionBuildResult(int Sealed, int Summarized, int Failed);
+public sealed record SessionBuildResult(int Sealed, int Summarized, int Failed, int Minor);
 
 /// <summary>
 /// Turns ungrouped captures into summarized sessions: group by time, seal in
@@ -32,6 +32,14 @@ public sealed class SessionBuilder
 {
     /// Roughly what one summary prompt should carry before sampling kicks in.
     internal const int SessionTextBudget = 6_000;
+
+    /// Below this, a session is not worth a model call. Measured against real
+    /// sessions, the split is stark: the throwaway ones (an empty test window,
+    /// a glance at a chat) held 234-658 characters, while the next real
+    /// session held 10,859. The threshold sits deliberately near the bottom of
+    /// that gap, because a short chat is exactly where a commitment hides and
+    /// skipping it would lose that signal to save ten seconds.
+    internal const int MinimumSummaryCharacters = 400;
 
     /// Most samples taken from a long session, spread across its span.
     internal const int MaxSamples = 12;
@@ -75,19 +83,24 @@ public sealed class SessionBuilder
 
         var summarized = 0;
         var failed = 0;
+        var minor = 0;
         foreach (var session in _store.GetUnsummarizedSessions(_maxSummariesPerRun))
         {
             cancellationToken.ThrowIfCancellationRequested();
             var text = BuildSessionText(_store.GetCaptureTexts(session.ScanIds));
-            if (string.IsNullOrWhiteSpace(text))
+            if (text.Length < MinimumSummaryCharacters)
             {
-                // Nothing readable was captured (all suppressed or redacted
-                // away). Record that rather than retrying it forever.
+                // Too little on screen to say anything real about. Keep the
+                // session as a record of the time, labelled from the window,
+                // and mark it so it is never picked up again.
                 _store.UpsertSession(session with
                 {
-                    Label = session.WindowTitle,
-                    Summary = "No readable content was captured for this session."
+                    Label = string.IsNullOrWhiteSpace(session.WindowTitle)
+                        ? session.ProcessName
+                        : session.WindowTitle,
+                    IsMinor = true
                 });
+                minor++;
                 continue;
             }
 
@@ -120,7 +133,7 @@ public sealed class SessionBuilder
             }
         }
 
-        return new(sealedCount, summarized, failed);
+        return new(sealedCount, summarized, failed, minor);
     }
 
     /// <summary>

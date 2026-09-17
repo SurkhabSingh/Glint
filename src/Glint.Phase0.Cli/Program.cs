@@ -334,6 +334,7 @@ try
                     built.Sealed,
                     built.Summarized,
                     built.Failed,
+                    built.Minor,
                     workerStarts = LiteRtWorkerMetrics.StartCount - startsBefore
                 },
                 json);

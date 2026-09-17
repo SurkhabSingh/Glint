@@ -1330,3 +1330,27 @@
   margin: 8px 0 0;
   overflow-wrap: anywhere;
 }
+
+.session-card.minor {
+  border-left-color: rgba(255, 255, 255, 0.12);
+  opacity: 0.75;
+}
+
+.minor-sessions {
+  margin-top: 10px;
+}
+
+.minor-sessions > summary {
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 6px 0;
+}
+
+.minor-sessions > summary:hover {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.minor-sessions .scan-list {
+  margin-top: 8px;
+}

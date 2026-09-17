@@ -22,6 +22,7 @@ function ActivityPage({
   setupLog,
   onSetupRuntime,
 }) {
+  const minorSessions = (sessions ?? []).filter((session) => session.isMinor);
   return (
     <div className="glint-page">
       <div className="glint-page-inner">
@@ -92,10 +93,26 @@ function ActivityPage({
               : "Start scanning to build your first session."}
         </p>
         <div className="scan-list">
-          {(sessions ?? []).map((session) => (
-            <SessionCard key={session.id} session={session} />
-          ))}
+          {(sessions ?? [])
+            .filter((session) => !session.isMinor)
+            .map((session) => (
+              <SessionCard key={session.id} session={session} />
+            ))}
         </div>
+        {minorSessions.length > 0 && (
+          <details className="minor-sessions">
+            <summary>
+              {`Show ${minorSessions.length} minor session${
+                minorSessions.length === 1 ? "" : "s"
+              } — glances with almost nothing on screen`}
+            </summary>
+            <div className="scan-list">
+              {minorSessions.map((session) => (
+                <SessionCard key={session.id} session={session} />
+              ))}
+            </div>
+          </details>
+        )}
 
         <h2 className="glint-section-title">Captures</h2>
         <p className="glint-section-sub">{historySummary}</p>

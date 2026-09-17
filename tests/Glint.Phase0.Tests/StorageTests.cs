@@ -215,6 +215,37 @@ public sealed class StorageTests : IDisposable
     }
 
     [Fact]
+    public void RevisitingEarlierContentIsCapturedAgain()
+    {
+        var keyStore = new DpapiKeyStore(Path.Combine(_directory, "revisit-key.bin"));
+        var databasePath = Path.Combine(_directory, "revisit-memory.db");
+        using var database = Phase0Database.Open(databasePath, keyStore);
+
+        void Save(string id, long at, string hash)
+        {
+            var capture = new RawCaptureEvent(
+                $"event-{id}", at, "chrome", null, "Docs", hash, $"text for {hash}", 0);
+            database.SaveManualScan(
+                capture,
+                new(id, at, "chrome", "Docs", "Docs", null, ManualScanStatus.Completed,
+                    null, hash, string.Empty, 10, 0, 0, 1, 1, 0));
+        }
+
+        Save("scan-a", 1_000, "HASH-A");
+
+        // The same screen immediately after is a repeat.
+        Assert.True(database.IsRepeatOfLastCapture("HASH-A"));
+
+        Save("scan-b", 2_000, "HASH-B");
+
+        // Coming back to the earlier screen is new activity, not a repeat.
+        // Whole-history dedup used to drop this, which also manufactured a
+        // gap that split the session.
+        Assert.False(database.IsRepeatOfLastCapture("HASH-A"));
+        Assert.True(database.ContainsManualScanContentHash("HASH-A"));
+    }
+
+    [Fact]
     public void DedupLookupUsesContentHashIndex()
     {
         var keyStore = new DpapiKeyStore(Path.Combine(_directory, "dedup-key.bin"));

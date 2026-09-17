@@ -76,6 +76,8 @@ public interface IManualScanStore
 {
     bool ContainsManualScanContentHash(string contentHash);
 
+    bool IsRepeatOfLastCapture(string contentHash);
+
     void SaveManualScan(RawCaptureEvent captureEvent, ManualScanRecord scan);
 
     IReadOnlyList<ManualScanRecord> GetRecentManualScans(int limit = 50);
@@ -101,7 +103,10 @@ public sealed record ActivitySession(
     string? ImportantSignals = null,
     string? ReminderCandidate = null,
     string HeadText = "",
-    string TailText = "");
+    string TailText = "",
+    // Too little was on screen to be worth a summary, so no model call was
+    // made. Distinct from "not summarized yet", which is a pending session.
+    bool IsMinor = false);
 
 public interface ISessionStore
 {
