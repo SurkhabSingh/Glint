@@ -39,6 +39,12 @@ static ROW_COUNTER: AtomicU64 = AtomicU64::new(0);
 static INSTANCE_ID: OnceLock<String> = OnceLock::new();
 static DROPPED_HOOKS: AtomicU64 = AtomicU64::new(0);
 static PROBE_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+/// Live EON (one Start→Pause run): (id, started_wall_ms).
+static CURRENT_EON: OnceLock<Mutex<Option<(String, i64)>>> = OnceLock::new();
+
+fn current_eon() -> &'static Mutex<Option<(String, i64)>> {
+    CURRENT_EON.get_or_init(|| Mutex::new(None))
+}
 static BOOT_WALL_MS: OnceLock<i64> = OnceLock::new();
 static BOOT_INSTANT: OnceLock<std::time::Instant> = OnceLock::new();
 
@@ -265,6 +271,124 @@ pub fn load_day(app: &AppHandle, day: &str) -> Result<Vec<serde_json::Value>, St
     let text =
         std::fs::read_to_string(&path).map_err(|e| format!("Timeline read failed: {e}"))?;
     Ok(text.lines().filter_map(open_line).collect())
+}
+
+// ---------------------------------------------------------------------------
+// EONs: one Start→Pause run. Append-only eons.jsonl with started/ended rows;
+// readers pair them. An EON left open (crash/kill) reads as still recording.
+// ---------------------------------------------------------------------------
+
+fn eons_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let root = crate::bridge::data_root()?;
+    let dir = root.join("timeline");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Timeline dir failed: {e}"))?;
+    Ok(dir.join("eons.jsonl"))
+}
+
+fn append_eons_line(app: &AppHandle, row: &serde_json::Value) {
+    let path = match eons_path(app) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("EON persist failed: {e}");
+            return;
+        }
+    };
+    let line = match seal_line(row) {
+        Ok(line) => line,
+        Err(e) => {
+            eprintln!("EON seal failed: {e}");
+            return;
+        }
+    };
+    (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        writeln!(file, "{line}")?;
+        file.sync_all()?;
+        Ok(())
+    })()
+    .unwrap_or_else(|e| eprintln!("EON append failed: {e}"));
+}
+
+/// Open an EON for this recording run. Returns its id.
+pub fn eon_started(app: &AppHandle) -> String {
+    let started = wall_ms();
+    let id = format!("eon-{started}");
+    *current_eon().lock().unwrap() = Some((id.clone(), started));
+    let mut row = base_row("eon.started");
+    row["eon_id"] = serde_json::Value::String(id.clone());
+    append_eons_line(app, &row);
+    let _ = app.emit("timeline-event", &row);
+    id
+}
+
+/// Close the live EON (single owner: the scan-loop finalize path).
+pub fn eon_ended(app: &AppHandle) {
+    let live = current_eon().lock().unwrap().take();
+    if let Some((id, _started)) = live {
+        let mut row = base_row("eon.ended");
+        row["eon_id"] = serde_json::Value::String(id);
+        row["ended_ms"] = serde_json::Value::from(wall_ms());
+        append_eons_line(app, &row);
+        let _ = app.emit("timeline-event", &row);
+    }
+}
+
+/// Paired EON spans, oldest first: {id, started_ms, ended_ms|null}.
+/// Open-ended (crash/kill mid-run) reads as still recording.
+pub fn load_eons(app: &AppHandle) -> Vec<serde_json::Value> {
+    let path = match eons_path(app) {
+        Ok(path) => path,
+        Err(_) => return Vec::new(),
+    };
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut spans: Vec<serde_json::Value> = Vec::new();
+    let mut open_index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for line in text.lines() {
+        let Some(row) = open_line(line) else {
+            continue;
+        };
+        let kind = row.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        let id = row
+            .get("eon_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if id.is_empty() {
+            continue;
+        }
+        match kind {
+            "eon.started" => {
+                let started = row.get("ts_wall_ms").and_then(|v| v.as_i64()).unwrap_or(0);
+                open_index.insert(id.clone(), spans.len());
+                spans.push(serde_json::json!({
+                    "id": id, "started_ms": started, "ended_ms": serde_json::Value::Null,
+                }));
+            }
+            "eon.ended" => {
+                if let Some(&index) = open_index.get(&id) {
+                    let ended = row
+                        .get("ended_ms")
+                        .and_then(|v| v.as_i64())
+                        .or_else(|| row.get("ts_wall_ms").and_then(|v| v.as_i64()))
+                        .unwrap_or(0);
+                    spans[index]["ended_ms"] = serde_json::Value::from(ended);
+                    open_index.remove(&id);
+                }
+            }
+            _ => {}
+        }
+    }
+    spans
+}
+
+/// Recording-state lifecycle marker in the day feed (also emitted live).
+pub fn record_lifecycle(app: &AppHandle, kind: &str) {
+    push_row(app, base_row(kind));
 }
 
 // ---------------------------------------------------------------------------

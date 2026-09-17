@@ -35,7 +35,7 @@ function ActivityPage({
           <h3>Capture</h3>
           <p>
             Start scanning, switch between windows, and Glint will capture
-            changed context until paused.
+              changed context until stopped.
           </p>
           <p className="dim">{modelSummary}</p>
           {runtimeSetup && (
@@ -64,7 +64,7 @@ function ActivityPage({
               Start scanning
             </button>
             <button className="glint-btn" onClick={onPause} disabled={!scanning}>
-              Pause scanning
+              Stop scanning
             </button>
             <button className="glint-btn" onClick={onBorderless}>
               Enable borderless capture

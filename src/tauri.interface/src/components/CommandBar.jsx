@@ -15,7 +15,7 @@ import { hexToRgba, loadTheme, sanitizeTheme } from "../ColorSwitcher";
 const SUGGESTIONS = [
   { tag: "capture this", glyph: "⧉" },
   { tag: "start scanning", glyph: "▶" },
-  { tag: "pause scanning", glyph: "⏸" },
+  { tag: "stop scanning", glyph: "⏸" },
   { tag: "search your context", glyph: "⌕" },
   { tag: "open Glint", glyph: "❖" },
 ];
@@ -170,7 +170,7 @@ function CommandBar() {
           </button>
         ))}
       </div>
-      <div className="cmdbar-hint">Ctrl+Alt+G toggles this command bar. Ctrl+Alt+S starts, Ctrl+Alt+P pauses scanning. Esc closes it.</div>
+      <div className="cmdbar-hint">Ctrl+Alt+G toggles this command bar. Ctrl+Alt+S starts, Ctrl+Alt+P stops scanning. Esc closes it.</div>
     </div>
   );
 }

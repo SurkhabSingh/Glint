@@ -84,7 +84,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open_dashboard = MenuItem::with_id(app, "tray-open", "Open Glint", true, None::<&str>)?;
     let search = MenuItem::with_id(app, "tray-search", "Search context", true, None::<&str>)?;
     let start = MenuItem::with_id(app, "tray-start", "Start scanning\tCtrl+Alt+S", true, None::<&str>)?;
-    let pause = MenuItem::with_id(app, "tray-pause", "Pause scanning\tCtrl+Alt+P", false, None::<&str>)?;
+    let pause = MenuItem::with_id(app, "tray-pause", "Stop scanning\tCtrl+Alt+P", false, None::<&str>)?;
     let exit = MenuItem::with_id(app, "tray-exit", "Exit Glint", true, None::<&str>)?;
     use tauri::menu::PredefinedMenuItem;
     let sep1 = PredefinedMenuItem::separator(app)?;

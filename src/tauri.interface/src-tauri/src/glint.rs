@@ -129,7 +129,7 @@ fn friendly_model_error(stderr: &str) -> String {
     }
     if transient {
         format!(
-            "The local model stumbled (worker error, usually transient — asked again automatically). If this persists, pause scanning and retry. Technical detail: {detail}"
+            "The local model stumbled (worker error, usually transient — asked again automatically). If this persists, stop scanning and retry. Technical detail: {detail}"
         )
     } else {
         detail
@@ -573,11 +573,14 @@ async fn scan_loop(app: AppHandle, generation: u64) {
         }
     }
 
-    // Loop exit owns the final paused state (ports the finally/catch block).
+    // Loop exit owns the final stopped state. The gate is the generation
+    // alone: stop clears `scanning` up front, so requiring it here would
+    // skip this block on exactly the path that needs it ( Pause → exit ).
+    // A superseded generation (newer Start) still skips via mismatch.
     let should_finalize = {
         let runtime: State<ScanRuntime> = app.state::<ScanRuntime>();
         let mut state = runtime.state.lock().unwrap();
-        if state.generation == generation && state.scanning {
+        if state.generation == generation {
             state.scanning = false;
             true
         } else {
@@ -589,10 +592,12 @@ async fn scan_loop(app: AppHandle, generation: u64) {
             "scan-state",
             serde_json::json!({
                 "scanning": false,
-                "captureSummary": "Scanning paused.",
-                "overall": overall_info("Continuous local scanning is paused.".to_string()),
+                "captureSummary": "Scanning stopped.",
+                "overall": overall_info("Continuous local scanning is stopped.".to_string()),
             }),
         );
+        crate::timeline::record_lifecycle(&app, "scan.stopped");
+        crate::timeline::eon_ended(&app);
         crate::refresh_tray(&app, false);
     }
 }
@@ -1039,13 +1044,17 @@ pub fn glint_start_scanning(app: AppHandle) -> Result<serde_json::Value, String>
     tauri::async_runtime::spawn(async move {
         heartbeat_loop(heartbeat_app, generation).await;
     });
+    // EON + lifecycle markers: the run and its recording state are now
+    // first-class timeline rows, not just banner text.
+    crate::timeline::eon_started(&app);
+    crate::timeline::record_lifecycle(&app, "scan.started");
     crate::refresh_tray(&app, true);
 
     Ok(serde_json::json!({
         "scanning": true,
         "captureSummary": capture_summary,
         "overall": overall_info(
-            "Continuous local scanning is active. Return to Glint and select Pause scanning to stop."
+            "Continuous local scanning is active. Return to Glint and select Stop scanning to stop."
                 .to_string()
         ),
     }))
@@ -1075,7 +1084,7 @@ pub async fn glint_pause_scanning(app: AppHandle) -> Result<serde_json::Value, S
     crate::refresh_tray(&app, false);
     Ok(serde_json::json!({
         "scanning": false,
-        "captureSummary": "Pausing the active scan...",
+        "captureSummary": "Stopping…",
     }))
 }
 
@@ -1245,42 +1254,142 @@ pub async fn glint_ask(
         }));
     }
 
-    // 3. Build a budgeted context (labels + summaries + signals only —
-    // never full redacted dumps), newest first. Hard cap ~3.5k chars: the
+    // 3. Build a budgeted context from SESSION blocks (not raw scans):
+    // consecutive same-session scans merge into one entry carrying its
+    // span + duration, so the model narrates activities ("played X for
+    // 5 mins") instead of data-dumping scans. Hard cap ~3.5k chars: the
     // worker rejects inputs past ~1.9k tokens within milliseconds, and
     // token-dense content needs the margin. Deterministic pass > retry.
+    fn clock(ms: i64) -> String {
+        chrono::DateTime::from_timestamp_millis(ms)
+            .map(|utc| {
+                chrono::Local
+                    .from_utc_datetime(&utc.naive_utc())
+                    .format("%-I:%M %p")
+                    .to_string()
+            })
+            .unwrap_or_default()
+    }
+    fn duration(ms: i64) -> String {
+        if ms < 60_000 {
+            "under a minute".to_string()
+        } else if ms < 3_600_000 {
+            format!("about {} mins", ms / 60_000)
+        } else {
+            format!(
+                "about {} hrs {} mins",
+                ms / 3_600_000,
+                (ms % 3_600_000) / 60_000
+            )
+        }
+    }
     const CONTEXT_BUDGET: usize = 3_500;
     let mut context = String::new();
     let mut cited = Vec::new();
-    for (index, scan) in scoped.iter().enumerate() {
-        let label = scan.get("label").and_then(|v| v.as_str()).unwrap_or("Untitled");
-        let summary = scan.get("summary").and_then(|v| v.as_str()).unwrap_or("");
-        let process = scan.get("processName").and_then(|v| v.as_str()).unwrap_or("?");
-        let ts = scan.get("capturedAtMilliseconds").and_then(|v| v.as_i64()).unwrap_or(0);
-        let important = scan.get("importantSignals").and_then(|v| v.as_str()).unwrap_or("");
-        let reminder = scan.get("reminderCandidate").and_then(|v| v.as_str()).unwrap_or("");
+    let mut index = 0usize;
+    // Sessions are time-contiguous, so same-session scans are always
+    // adjacent: extend each block while the session id holds.
+    let mut i = 0;
+    while i < scoped.len() {
+        let mut j = i + 1;
+        while j < scoped.len() {
+            let a = scoped[i].get("sessionId").and_then(|v| v.as_str());
+            let b = scoped[j].get("sessionId").and_then(|v| v.as_str());
+            match (a, b) {
+                (Some(x), Some(y)) if x == y => j += 1,
+                _ => break,
+            }
+        }
+        let block = &scoped[i..j];
+        i = j;
+        let times: Vec<i64> = block
+            .iter()
+            .map(|s| {
+                s.get("capturedAtMilliseconds")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0)
+            })
+            .collect();
+        let start = times.iter().copied().min().unwrap_or(0);
+        let end = times.iter().copied().max().unwrap_or(0);
+        let head = block[0];
+        let process = head
+            .get("processName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let label = block
+            .iter()
+            .filter_map(|s| s.get("label").and_then(|v| v.as_str()))
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("Untitled activity");
+        let mut notes: Vec<&str> = Vec::new();
+        for scan in block {
+            if let Some(summary) = scan.get("summary").and_then(|v| v.as_str()) {
+                let trimmed = summary.trim();
+                if !trimmed.is_empty() && !notes.contains(&trimmed) {
+                    notes.push(trimmed);
+                }
+            }
+            if notes.len() >= 2 {
+                break;
+            }
+        }
+        let mut key = String::new();
+        for scan in block {
+            for field in ["importantSignals", "reminderCandidate"] {
+                if let Some(text) = scan.get(field).and_then(|v| v.as_str()) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() && !key.contains(trimmed) {
+                        if !key.is_empty() {
+                            key.push_str("; ");
+                        }
+                        key.push_str(trimmed);
+                    }
+                }
+            }
+            if key.len() > 300 {
+                break;
+            }
+        }
         let entry = format!(
-            "[{index}] {label} ({process}, {ts})\n{summary}\nImportant: {important}\nReminder: {reminder}\n"
+            "[{index}] {label} ({process}) — {dur} ({range})\nWhat happened: {notes}\nKey: {key}\n",
+            dur = duration(end - start),
+            range = format!("{}–{}", clock(start), clock(end)),
+            notes = if notes.is_empty() {
+                "no summary recorded".to_string()
+            } else {
+                notes.join(" / ")
+            },
+            key = if key.is_empty() { "-".to_string() } else { key },
         );
         if context.len() + entry.len() > CONTEXT_BUDGET {
             break;
         }
         context.push_str(&entry);
-        cited.push(serde_json::json!({
-            "id": scan.get("id"),
-            "label": label,
-            "capturedAtMilliseconds": ts,
-            "processName": process,
-        }));
+        for scan in block {
+            if cited.len() >= 12 {
+                break;
+            }
+            cited.push(serde_json::json!({
+                "id": scan.get("id"),
+                "label": scan.get("label").and_then(|v| v.as_str()).unwrap_or("Untitled"),
+                "capturedAtMilliseconds": scan.get("capturedAtMilliseconds").and_then(|v| v.as_i64()).unwrap_or(0),
+                "processName": scan.get("processName").and_then(|v| v.as_str()).unwrap_or("?"),
+            }));
+        }
+        index += 1;
     }
 
     let prompt = format!(
-        "Answer the user's question using ONLY the captured context below. \
-         Reference sources like [0], [1] where they support the answer. \
-         If the context lacks evidence, say so plainly instead of inventing \
-         an answer. Format the answer as one short paragraph followed by a \
-         'Summary:' line and 3-6 dash-led bullet points (- ...) capturing \
-         the key facts.\n\nQuestion: {question}\n\nCaptured context:\n{context}"
+        "You narrate the user's day from their activity log. Write like this: \
+         \"Here's what you did today~! You played Stellar Blade for 5 mins, \
+         you compared LLM models for about 3-4 mins...\" Then a 'Summary:' \
+         line with 3-6 dash-led bullet points (- ...) of key facts with [n] \
+         citations. Rules: every activity gets its GIVEN duration — never \
+         invent or round durations; order oldest-first (entries are listed \
+         newest-first, so reorder); merge trivial repeats silently; if \
+         evidence is thin, say what you know and what you don't; answer ONLY \
+         from the sessions below.\n\nQuestion: {question}\n\nSessions (newest first):\n{context}"
     );
 
     // 4. Generate via the existing model-generate verb (5 min cap inside).
@@ -1355,7 +1464,7 @@ pub fn glint_shortcut_status(app: AppHandle) -> Result<serde_json::Value, String
     let items = [
         ("ctrl+alt+g", "Open command bar"),
         ("ctrl+alt+s", "Start scanning"),
-        ("ctrl+alt+p", "Pause scanning"),
+        ("ctrl+alt+p", "Stop scanning"),
     ]
     .into_iter()
     .map(|(shortcut, action)| {
@@ -1381,6 +1490,8 @@ pub fn glint_timeline(app: AppHandle, date: Option<String>) -> Result<serde_json
     Ok(serde_json::json!({
         "date": day,
         "events": events,
+        "eons": crate::timeline::load_eons(&app),
         "droppedHooks": crate::timeline::dropped_count(),
     }))
 }
+

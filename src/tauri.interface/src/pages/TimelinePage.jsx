@@ -70,6 +70,82 @@ function dwellText(ms) {
   return ` · ${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
 }
 
+function hourMinute(ms) {
+  const d = new Date(Number(ms));
+  let h = d.getHours();
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12;
+  if (h === 0) h = 12;
+  return `${h}:${String(d.getMinutes()).padStart(2, "0")} ${ampm}`;
+}
+
+/**
+ * Clusters consecutive scans sharing a sessionId (sessions are
+ * time-contiguous, so same-session scans are always adjacent).
+ * Singletons and ungrouped (null) scans render flat, as before.
+ */
+function clusterSessions(scans) {
+  const clusters = [];
+  for (const scan of scans) {
+    const sid = scan.sessionId ?? null;
+    const last = clusters[clusters.length - 1];
+    if (sid && last && last.sessionId === sid) {
+      last.scans.push(scan);
+    } else {
+      clusters.push({ sessionId: sid, scans: [scan] });
+    }
+  }
+  return clusters;
+}
+
+function SessionHeader({ scans }) {
+  const times = scans
+    .map((s) => Number(s.capturedAtMilliseconds))
+    .sort((a, b) => a - b);
+  const process = scans[0]?.processName ?? "unknown";
+  const range =
+    times.length > 1
+      ? `${hourMinute(times[0])}–${hourMinute(times[times.length - 1])}`
+      : hourMinute(times[0]);
+  return (
+    <div className="session-header">
+      <span className="session-tick" aria-hidden="true" />
+      <span>
+        Session · {process} · {range} · {scans.length} scan
+        {scans.length === 1 ? "" : "s"}
+      </span>
+    </div>
+  );
+}
+
+function renderScanList(scans, emptyText) {
+  if (scans.length === 0) {
+    return (
+      <div className="scan-list">
+        <div className="scan-card">
+          <div className="scan-summary">{emptyText}</div>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="scan-list">
+      {clusterSessions(scans).map((cluster) =>
+        cluster.sessionId && cluster.scans.length > 1 ? (
+          <div key={cluster.sessionId}>
+            <SessionHeader scans={cluster.scans} />
+            {cluster.scans.map((scan) => (
+              <ScanCard key={scan.id} scan={scan} />
+            ))}
+          </div>
+        ) : (
+          cluster.scans.map((scan) => <ScanCard key={scan.id} scan={scan} />)
+        )
+      )}
+    </div>
+  );
+}
+
 /**
  * Grouped history: Hour / Day / Week / Month over scans + timeline events.
  * Day is the default view. The Hour view toggles Summarized (scan cards)
@@ -182,6 +258,69 @@ function TimelinePage() {
 
   function renderEventRow(row, index, list) {
     const key = row.id ?? `${row.ts_wall_ms}-${index}`;
+    if (row.kind === "eon.started") {
+      return (
+        <div className="tl-row eon" key={key}>
+          <span className="tl-time" title={formatTimestamp(row.ts_wall_ms)}>
+            {formatClock(row.ts_wall_ms)}
+          </span>
+          <span className="tl-dot" />
+          <span className="tl-text">
+            <strong>EON began — recording started</strong>
+          </span>
+        </div>
+      );
+    }
+    if (row.kind === "eon.ended") {
+      const started = list.find(
+        (r) => r.kind === "eon.started" && r.eon_id === row.eon_id
+      );
+      const span =
+        started?.ts_wall_ms != null
+          ? ` · ran ${dwellText(row.ts_wall_ms - started.ts_wall_ms).slice(3)}`
+          : "";
+      return (
+        <div className="tl-row eon ended" key={key}>
+          <span className="tl-time" title={formatTimestamp(row.ts_wall_ms)}>
+            {formatClock(row.ts_wall_ms)}
+          </span>
+          <span className="tl-dot idle" />
+          <span className="tl-text">
+            <strong>EON ended{span}</strong>
+          </span>
+        </div>
+      );
+    }
+    if (row.kind === "scan.started") {
+      return (
+        <div className="tl-row" key={key}>
+          <span className="tl-time" title={formatTimestamp(row.ts_wall_ms)}>
+            {formatClock(row.ts_wall_ms)}
+          </span>
+          <span className="tl-dot rec" />
+          <span className="tl-text">
+            <strong>Recording started</strong>
+          </span>
+        </div>
+      );
+    }
+    if (row.kind === "scan.stopped" || row.kind === "scan.paused") {
+      return (
+        <div className="tl-row dim" key={key}>
+          <span className="tl-time" title={formatTimestamp(row.ts_wall_ms)}>
+            {formatClock(row.ts_wall_ms)}
+          </span>
+          <span className="tl-dot idle" />
+          <span className="tl-text">
+            <strong>
+              {row.kind === "scan.stopped"
+                ? "Recording stopped"
+                : "Recording paused"}
+            </strong>
+          </span>
+        </div>
+      );
+    }
     if (row.kind === "heartbeat") {
       return (
         <div className="tl-row dim" key={key}>
@@ -237,6 +376,61 @@ function TimelinePage() {
     (r) => r.kind === "window.focused"
   ).length;
 
+  const MARKER_KINDS = [
+    "eon.started",
+    "eon.ended",
+    "scan.started",
+    "scan.paused",
+    "scan.stopped",
+  ];
+
+  // Summarized day view with EON/scan lifecycle markers interleaved at
+  // their timestamps, so a run's begin/end reads as structure, not text.
+  function renderDayList() {
+    const markers = (eventsCache[dayStr] ?? [])
+      .filter((r) => MARKER_KINDS.includes(r.kind))
+      .map((r) => ({ marker: r, ts: Number(r.ts_wall_ms) }));
+    if (dayScans.length === 0 && markers.length === 0) {
+      return renderScanList(
+        [],
+        "No scans recorded this day. Start scanning to capture context."
+      );
+    }
+    const items = [
+      ...clusterSessions(dayScans).map((cluster) => ({
+        cluster,
+        ts: Math.max(
+          ...cluster.scans.map((s) => Number(s.capturedAtMilliseconds))
+        ),
+      })),
+      ...markers,
+    ].sort((a, b) => b.ts - a.ts);
+    return (
+      <div className="scan-list">
+        {items.map((item, i) => {
+          if (item.marker) {
+            return renderEventRow(
+              item.marker,
+              i,
+              items.map((x) => x.marker ?? {})
+            );
+          }
+          const cluster = item.cluster;
+          return cluster.sessionId && cluster.scans.length > 1 ? (
+            <div key={cluster.sessionId}>
+              <SessionHeader scans={cluster.scans} />
+              {cluster.scans.map((scan) => (
+                <ScanCard key={scan.id} scan={scan} />
+              ))}
+            </div>
+          ) : (
+            cluster.scans.map((scan) => <ScanCard key={scan.id} scan={scan} />)
+          );
+        })}
+      </div>
+    );
+  }
+
   return (
     <div className="glint-page">
       <div className="glint-page-inner narrow">
@@ -279,18 +473,7 @@ function TimelinePage() {
             <p className="glint-section-sub">
               {dayScans.length} scans · {daySwitches} window switches
             </p>
-            <div className="scan-list">
-              {dayScans.length === 0 && (
-                <div className="scan-card">
-                  <div className="scan-summary">
-                    No scans recorded this day. Start scanning to capture context.
-                  </div>
-                </div>
-              )}
-              {dayScans.map((scan) => (
-                <ScanCard key={scan.id} scan={scan} />
-              ))}
-            </div>
+            {renderDayList()}
           </>
         )}
 
@@ -350,19 +533,10 @@ function TimelinePage() {
               </div>
             </div>
             {hourTab === "summarized" ? (
-              <div className="scan-list">
-                {scansInHour(dayStr, hour).length === 0 && (
-                  <div className="scan-card">
-                    <div className="scan-summary">
-                      No summarized notes this hour. Switch to Timeline to see
-                      every switch that happened.
-                    </div>
-                  </div>
-                )}
-                {scansInHour(dayStr, hour).map((scan) => (
-                  <ScanCard key={scan.id} scan={scan} />
-                ))}
-              </div>
+              renderScanList(
+                scansInHour(dayStr, hour),
+                "No summarized notes this hour. Switch to Timeline to see every switch that happened."
+              )
             ) : (
               <div className="scan-list">
                 {eventsInHour(dayStr, hour).length === 0 && (
