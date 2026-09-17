@@ -131,7 +131,7 @@ fn normalize_pointer(root: &Path) -> bool {
 // ---------------------------------------------------------------------------
 
 fn run_quiet(program: &Path, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new(program).args(args).output().ok()?;
+    let output = crate::bridge::hidden_command(program).args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -181,7 +181,7 @@ fn base_interpreters() -> Vec<(String, Vec<String>)> {
 fn probe_base(program: &str, extra: &[String]) -> bool {
     let mut args: Vec<&str> = extra.iter().map(|s| s.as_str()).collect();
     args.push("--version");
-    std::process::Command::new(program)
+    crate::bridge::hidden_command(program)
         .args(&args)
         .output()
         .map(|o| o.status.success())
@@ -449,7 +449,7 @@ pub async fn setup_runtime(app: AppHandle) -> Result<serde_json::Value, String> 
         let prog = program.clone();
         let run = tokio::task::spawn_blocking(move || {
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            std::process::Command::new(&prog).args(&arg_refs).output()
+            crate::bridge::hidden_command(&prog).args(&arg_refs).output()
         })
         .await
         .map_err(|error| format!("Environment task failed: {error}"))?
@@ -474,7 +474,7 @@ pub async fn setup_runtime(app: AppHandle) -> Result<serde_json::Value, String> 
     let req = requirements.to_string_lossy().into_owned();
     let venv_py = venv_python.clone();
     let run = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(&venv_py)
+        crate::bridge::hidden_command(&venv_py)
             .args([
                 "-m",
                 "pip",

@@ -127,6 +127,23 @@ pub fn sqlite_vec_arg(app: &AppHandle, cli: &std::path::Path) -> Option<String> 
     find_in_resources(app, "vec0.dll").map(|p| p.to_string_lossy().into_owned())
 }
 
+/// The release build is a GUI-subsystem app (`main.rs`) while the CLI and the
+/// Python helpers are console programs, so every spawn opens a console window
+/// unless this flag is set — once per scan tick while scanning. Debug builds
+/// inherit the developer console, which is why it is invisible there.
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Build a child process that never shows a console window.
+pub fn hidden_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 /// `--host-pid` for every verb: the CLI runs in its own short-lived process,
 /// so without this it cannot recognise this host's windows (dashboard,
 /// command bar) as Glint itself and would capture them.
@@ -148,7 +165,7 @@ pub fn run_sidecar(
     args: &[&str],
 ) -> Result<SidecarOutput, String> {
     let cli = sidecar_path(app)?;
-    let output = std::process::Command::new(&cli)
+    let output = hidden_command(&cli)
         .args(args)
         .args(host_args())
         .output()

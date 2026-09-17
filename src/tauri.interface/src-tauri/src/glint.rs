@@ -477,6 +477,7 @@ async fn run_manual_scan(
     let _model = model_state.model_lock.lock().await;
     let child = tokio::process::Command::new(&cli)
         .args(&args)
+        .creation_flags(crate::bridge::CREATE_NO_WINDOW)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -1122,7 +1123,7 @@ pub async fn glint_capture_once(app: AppHandle) -> Result<serde_json::Value, Str
     let model_state: State<ScanRuntime> = app.state();
     let _model = model_state.model_lock.lock().await;
     let output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(&cli).args(&args).output()
+        crate::bridge::hidden_command(&cli).args(&args).output()
     })
     .await
     .map_err(|error| format!("Capture task failed: {error}"))?
@@ -1420,7 +1421,7 @@ pub async fn glint_ask(
             let cli = crate::bridge::sidecar_path(&blocking_app)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            std::process::Command::new(&cli).args(&arg_refs).output()
+            crate::bridge::hidden_command(&cli).args(&arg_refs).output()
         })
         .await
         .map_err(|error| format!("Agent task failed: {error}"))?
