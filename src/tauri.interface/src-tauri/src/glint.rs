@@ -491,6 +491,20 @@ pub fn glint_sessions(app: AppHandle, limit: Option<u32>) -> Result<serde_json::
     Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
 }
 
+/// Record that the user went away or came back, or that recording started or
+/// stopped. The sessionizer reads these to tell a real break from a screen
+/// that simply did not change. Best effort: a lost marker only costs the
+/// fallback gap rule, so it never blocks the loop.
+fn record_marker(app: &AppHandle, kind: &'static str) {
+    let Ok(root) = crate::bridge::data_root() else {
+        return;
+    };
+    let mut args = vec!["mark".to_string(), "--kind".to_string(), kind.to_string()];
+    args.extend(crate::bridge::db_args(app, &root));
+    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
+    let _ = crate::bridge::run_sidecar(app, &arg_refs);
+}
+
 /// How often the loop groups captures into sessions and summarizes them.
 const SESSIONIZE_INTERVAL_MS: u64 = 60_000;
 
@@ -651,6 +665,11 @@ async fn scan_loop(app: AppHandle, generation: u64) {
                 if !away {
                     away = true;
                     crate::timeline::record_lifecycle(&app, "user.away");
+                    let marker_app = app.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        record_marker(&marker_app, "user.away")
+                    })
+                    .await;
                 }
                 cadence::POLL_INTERVAL_MS
             }
@@ -659,6 +678,11 @@ async fn scan_loop(app: AppHandle, generation: u64) {
                 if away {
                     away = false;
                     crate::timeline::record_lifecycle(&app, "user.returned");
+                    let marker_app = app.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        record_marker(&marker_app, "user.returned")
+                    })
+                    .await;
                 }
                 foreground_changed_at = None;
 
@@ -735,6 +759,14 @@ async fn scan_loop(app: AppHandle, generation: u64) {
         }
     };
     if should_finalize {
+        // Recorded before sealing, so the final session sees the stop as the
+        // boundary it is.
+        let marker_app = app.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            record_marker(&marker_app, "run.stopped")
+        })
+        .await;
+
         // Nothing is in progress any more, so seal and summarize the last
         // stretch too rather than leaving it ungrouped until the next run.
         if let Some(result) = run_sessionize(&app, true).await {
@@ -1200,6 +1232,7 @@ pub fn glint_start_scanning(app: AppHandle) -> Result<serde_json::Value, String>
     // first-class timeline rows, not just banner text.
     crate::timeline::eon_started(&app);
     crate::timeline::record_lifecycle(&app, "scan.started");
+    record_marker(&app, "run.started");
     crate::refresh_tray(&app, true);
 
     Ok(serde_json::json!({

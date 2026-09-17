@@ -349,6 +349,46 @@ public interface ICaptureEventStore
             reader.IsDBNull(12) ? string.Empty : reader.GetString(12),
             !reader.IsDBNull(13) && reader.GetInt64(13) != 0);
 
+    /// <summary>
+    /// Records that the user went away or came back, or that recording
+    /// started or stopped. These are what let the sessionizer tell a real
+    /// break from a screen that simply did not change.
+    /// </summary>
+    public void RecordMarker(string kind, long timestampMilliseconds)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            "INSERT INTO activity_markers (ts_ms, kind) VALUES ($ts, $kind);";
+        command.Parameters.AddWithValue("$ts", timestampMilliseconds);
+        command.Parameters.AddWithValue("$kind", kind);
+        command.ExecuteNonQuery();
+    }
+
+    /// Markers within a window, oldest first.
+    public IReadOnlyList<ActivityMarker> GetMarkers(
+        long fromMilliseconds,
+        long toMilliseconds)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT ts_ms, kind
+            FROM activity_markers
+            WHERE ts_ms >= $from AND ts_ms <= $to
+            ORDER BY ts_ms ASC, id ASC;
+            """;
+        command.Parameters.AddWithValue("$from", fromMilliseconds);
+        command.Parameters.AddWithValue("$to", toMilliseconds);
+        using var reader = command.ExecuteReader();
+        var markers = new List<ActivityMarker>();
+        while (reader.Read())
+        {
+            markers.Add(new(reader.GetInt64(0), reader.GetString(1)));
+        }
+
+        return markers;
+    }
+
     /// Captures not yet grouped into a session, oldest first: the batch the
     /// sessionizer walks.
     public IReadOnlyList<CaptureRow> GetUnassignedCaptures(int limit = 1_000)
@@ -924,6 +964,19 @@ public interface ICaptureEventStore
             """
             INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
             VALUES (8, CAST(unixepoch('subsec') * 1000 AS INTEGER));
+
+            CREATE TABLE IF NOT EXISTS activity_markers (
+                id INTEGER PRIMARY KEY,
+                ts_ms INTEGER NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN (
+                    'run.started', 'run.stopped', 'user.away', 'user.returned'))
+            ) STRICT;
+
+            CREATE INDEX IF NOT EXISTS idx_activity_markers_ts
+            ON activity_markers(ts_ms);
+
+            INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
+            VALUES (9, CAST(unixepoch('subsec') * 1000 AS INTEGER));
             """);
     }
 

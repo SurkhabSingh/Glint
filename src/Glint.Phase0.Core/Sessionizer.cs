@@ -9,6 +9,15 @@ public sealed record CaptureRow(
     string ProcessName,
     string WindowTitle);
 
+/// Evidence that the user stepped away or that recording stopped. Kinds are
+/// `user.away`, `user.returned`, `run.started` and `run.stopped`.
+public sealed record ActivityMarker(long TimestampMilliseconds, string Kind)
+{
+    /// Marks that end a stretch of work, as opposed to resuming one.
+    public bool EndsAStretch =>
+        Kind is "user.away" or "run.stopped";
+}
+
 /// A group of captures that belongs together, before it is written.
 public sealed record SessionDraft(
     long StartedAtMilliseconds,
@@ -39,8 +48,28 @@ public sealed record SessionDraft(
 /// </summary>
 public static class Sessionizer
 {
-    /// Silence longer than this ends a session.
+    /// <summary>
+    /// A gap this long only ends a session when something explains it — the
+    /// user went away, or recording stopped.
+    /// </summary>
+    /// <remarks>
+    /// A gap on its own says nothing. Because a capture is only stored when
+    /// the screen changes, reading one page for twenty minutes produces a
+    /// single capture and then silence, which is indistinguishable by time
+    /// alone from having walked out of the room. Splitting on the gap turned
+    /// one long read into several sessions.
+    /// </remarks>
     public const long IdleGapMilliseconds = 300_000;
+
+    /// <summary>
+    /// A gap this long ends a session even with nothing to explain it.
+    /// </summary>
+    /// <remarks>
+    /// The fallback for missing evidence: a crash leaves no stop marker, and
+    /// history recorded before markers existed has none at all. Without this,
+    /// such a store would collapse into one enormous session.
+    /// </remarks>
+    public const long UnexplainedGapMilliseconds = 1_800_000;
 
     /// Hard cap so one long stretch does not become an unsummarizable blob.
     public const long MaxSessionMilliseconds = 2_700_000;
@@ -56,13 +85,20 @@ public static class Sessionizer
     /// </summary>
     public static IReadOnlyList<SessionDraft> Cluster(
         IReadOnlyList<CaptureRow> captures,
-        long nowMilliseconds)
+        long nowMilliseconds,
+        IReadOnlyList<ActivityMarker>? markers = null)
     {
         ArgumentNullException.ThrowIfNull(captures);
         if (captures.Count == 0)
         {
             return [];
         }
+
+        var breaks = (markers ?? [])
+            .Where(marker => marker.EndsAStretch)
+            .Select(marker => marker.TimestampMilliseconds)
+            .OrderBy(timestamp => timestamp)
+            .ToList();
 
         var ordered = captures
             .OrderBy(capture => capture.CapturedAtMilliseconds)
@@ -74,8 +110,11 @@ public static class Sessionizer
 
         foreach (var capture in ordered.Skip(1))
         {
-            var gap = capture.CapturedAtMilliseconds - current[^1].CapturedAtMilliseconds;
-            if (gap > IdleGapMilliseconds)
+            var previous = current[^1].CapturedAtMilliseconds;
+            var gap = capture.CapturedAtMilliseconds - previous;
+            var explained = gap >= IdleGapMilliseconds
+                && breaks.Any(at => at > previous && at < capture.CapturedAtMilliseconds);
+            if (explained || gap > UnexplainedGapMilliseconds)
             {
                 groups.Add(current);
                 current = [capture];

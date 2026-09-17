@@ -153,6 +153,14 @@ public sealed class SessionBuilderTests
                 .Take(limit)
                 .ToList();
 
+        public List<ActivityMarker> Markers { get; } = [];
+
+        public IReadOnlyList<ActivityMarker> GetMarkers(long fromMilliseconds, long toMilliseconds) =>
+            Markers
+                .Where(marker => marker.TimestampMilliseconds >= fromMilliseconds
+                    && marker.TimestampMilliseconds <= toMilliseconds)
+                .ToList();
+
         public ActivitySession? GetOpenSession() => null;
 
         public void UpsertSession(ActivitySession session) => Sessions[session.Id] = session;

@@ -10,6 +10,8 @@ public interface ISessionWorkStore : ISessionStore
     void SealSession(ActivitySession session, IReadOnlyList<string> scanIds);
 
     IReadOnlyList<ActivitySession> GetUnsummarizedSessions(int limit = 20);
+
+    IReadOnlyList<ActivityMarker> GetMarkers(long fromMilliseconds, long toMilliseconds);
 }
 
 public sealed record SessionBuildResult(int Sealed, int Summarized, int Failed, int Minor);
@@ -62,10 +64,15 @@ public sealed class SessionBuilder
         long nowMilliseconds,
         CancellationToken cancellationToken = default)
     {
+        var captures = _store.GetUnassignedCaptures();
+        // Markers covering the captures being grouped, so a gap can be told
+        // apart from a break.
+        var markers = captures.Count == 0
+            ? []
+            : _store.GetMarkers(captures[0].CapturedAtMilliseconds, nowMilliseconds);
+
         var sealedCount = 0;
-        foreach (var draft in Sessionizer.Cluster(
-                     _store.GetUnassignedCaptures(),
-                     nowMilliseconds))
+        foreach (var draft in Sessionizer.Cluster(captures, nowMilliseconds, markers))
         {
             var session = new ActivitySession(
                 Guid.NewGuid().ToString("N"),

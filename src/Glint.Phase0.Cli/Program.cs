@@ -283,6 +283,21 @@ try
             break;
         }
 
+        // Records that the user went away or came back, or that recording
+        // started or stopped. The sessionizer uses these to tell a real break
+        // from a screen that simply did not change.
+        case "mark":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            var kind = RequireOption(options, "kind");
+            var at = long.TryParse(options.GetValueOrDefault("at"), out var parsedAt)
+                ? parsedAt
+                : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            database.RecordMarker(kind, at);
+            WriteJson(new { kind, atMilliseconds = at }, json);
+            break;
+        }
+
         // Sessions, newest first, with their summaries. The UI shows these
         // rather than per-capture rows.
         case "sessions":
@@ -502,6 +517,7 @@ try
                   search-context --query TEXT [--limit 30] [--data-dir PATH]
                   model-probe --runtime PATH --model PATH
                   model-generate --python PATH --worker PATH --model PATH --prompt TEXT [--backend cpu]
+                  mark --kind run.started|run.stopped|user.away|user.returned [--at MS]
                   sessions [--limit 50] [--data-dir PATH] [--sqlite-vec PATH]
                   sessionize [--max-summaries 5] [--seal-open] [--data-dir PATH] [--sqlite-vec PATH]
                   worker-bench [--runs 3] [--prompt TEXT] [--max-tokens 4096] [--data-dir PATH]

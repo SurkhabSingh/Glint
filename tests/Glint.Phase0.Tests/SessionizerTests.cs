@@ -68,32 +68,112 @@ public sealed class SessionizerTests
     }
 
     [Fact]
-    public void AGapLongerThanTheIdleThresholdSplits()
+    public void AQuietGapAloneDoesNotSplit()
+    {
+        // Reading one page produces a capture and then silence, because
+        // nothing changes. By time alone that is indistinguishable from
+        // leaving the room, so it must not end the session on its own.
+        List<CaptureRow> captures =
+        [
+            Capture(0),
+            Capture(Sessionizer.IdleGapMilliseconds * 2)
+        ];
+
+        var session = Assert.Single(
+            Sessionizer.Cluster(captures, Quiet(Sessionizer.IdleGapMilliseconds * 2)));
+
+        Assert.Equal(2, session.ScanIds.Count);
+    }
+
+    [Fact]
+    public void AGapTheUserExplainsByLeavingSplits()
     {
         List<CaptureRow> captures =
         [
             Capture(0),
-            Capture(Sessionizer.IdleGapMilliseconds + 1)
+            Capture(Sessionizer.IdleGapMilliseconds * 2)
+        ];
+        List<ActivityMarker> markers =
+        [
+            new(Start + Sessionizer.IdleGapMilliseconds, "user.away")
         ];
 
         var sessions = Sessionizer.Cluster(
             captures,
-            Quiet(Sessionizer.IdleGapMilliseconds + 1));
+            Quiet(Sessionizer.IdleGapMilliseconds * 2),
+            markers);
 
         Assert.Equal(2, sessions.Count);
-        Assert.Single(sessions[0].ScanIds);
-        Assert.Single(sessions[1].ScanIds);
     }
 
     [Fact]
-    public void AGapExactlyAtTheThresholdDoesNotSplit()
+    public void StoppingRecordingSplits()
     {
-        List<CaptureRow> captures = [Capture(0), Capture(Sessionizer.IdleGapMilliseconds)];
+        List<CaptureRow> captures =
+        [
+            Capture(0),
+            Capture(Sessionizer.IdleGapMilliseconds * 2)
+        ];
+        List<ActivityMarker> markers =
+        [
+            new(Start + Sessionizer.IdleGapMilliseconds, "run.stopped")
+        ];
 
-        var session = Assert.Single(
-            Sessionizer.Cluster(captures, Quiet(Sessionizer.IdleGapMilliseconds)));
+        Assert.Equal(
+            2,
+            Sessionizer.Cluster(
+                captures,
+                Quiet(Sessionizer.IdleGapMilliseconds * 2),
+                markers).Count);
+    }
 
-        Assert.Equal(2, session.ScanIds.Count);
+    [Fact]
+    public void ComingBackDoesNotSplit()
+    {
+        // Only marks that end a stretch are boundaries.
+        List<CaptureRow> captures =
+        [
+            Capture(0),
+            Capture(Sessionizer.IdleGapMilliseconds * 2)
+        ];
+        List<ActivityMarker> markers =
+        [
+            new(Start + Sessionizer.IdleGapMilliseconds, "user.returned")
+        ];
+
+        Assert.Single(
+            Sessionizer.Cluster(
+                captures,
+                Quiet(Sessionizer.IdleGapMilliseconds * 2),
+                markers));
+    }
+
+    [Fact]
+    public void AnUnexplainedGapStillSplitsEventually()
+    {
+        // The fallback for missing evidence: a crash leaves no stop marker,
+        // and history recorded before markers existed has none at all.
+        List<CaptureRow> captures =
+        [
+            Capture(0),
+            Capture(Sessionizer.UnexplainedGapMilliseconds + 1)
+        ];
+
+        var sessions = Sessionizer.Cluster(
+            captures,
+            Quiet(Sessionizer.UnexplainedGapMilliseconds + 1));
+
+        Assert.Equal(2, sessions.Count);
+    }
+
+    [Fact]
+    public void AMarkerOutsideTheGapIsIgnored()
+    {
+        // A break that happened before this stretch must not split it.
+        List<CaptureRow> captures = [Capture(60_000), Capture(120_000)];
+        List<ActivityMarker> markers = [new(Start, "user.away")];
+
+        Assert.Single(Sessionizer.Cluster(captures, Quiet(120_000), markers));
     }
 
     [Fact]
@@ -163,12 +243,16 @@ public sealed class SessionizerTests
         [
             Capture(0),
             Capture(1_000),
-            // After a long gap, new work that just started.
+            // The user stepped away, came back, and started something new.
             Capture(Sessionizer.IdleGapMilliseconds + 10_000)
         ];
+        List<ActivityMarker> markers = [new(Start + 5_000, "user.away")];
 
         var session = Assert.Single(
-            Sessionizer.Cluster(captures, Start + Sessionizer.IdleGapMilliseconds + 11_000));
+            Sessionizer.Cluster(
+                captures,
+                Start + Sessionizer.IdleGapMilliseconds + 11_000,
+                markers));
 
         Assert.Equal(2, session.ScanIds.Count);
     }
