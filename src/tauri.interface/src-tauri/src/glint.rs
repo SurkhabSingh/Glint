@@ -480,6 +480,26 @@ async fn heartbeat_loop(app: AppHandle, generation: u64) {
     }
 }
 
+/// Record the user's verdict on a session. Absolute: no rule overwrites it.
+#[tauri::command(async)]
+pub fn glint_set_session_outcome(
+    app: AppHandle,
+    id: String,
+    outcome: String,
+) -> Result<serde_json::Value, String> {
+    let root = crate::bridge::data_root()?;
+    let mut args = vec![
+        "session-outcome".to_string(),
+        "--id".to_string(),
+        id,
+        "--outcome".to_string(),
+        outcome,
+    ];
+    args.extend(crate::bridge::db_args(&app, &root));
+    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
+    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+}
+
 /// Sessions with their summaries, newest first.
 #[tauri::command(async)]
 pub fn glint_sessions(app: AppHandle, limit: Option<u32>) -> Result<serde_json::Value, String> {

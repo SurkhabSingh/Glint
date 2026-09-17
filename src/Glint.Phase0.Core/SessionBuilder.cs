@@ -12,9 +12,16 @@ public interface ISessionWorkStore : ISessionStore
     IReadOnlyList<ActivitySession> GetUnsummarizedSessions(int limit = 20);
 
     IReadOnlyList<ActivityMarker> GetMarkers(long fromMilliseconds, long toMilliseconds);
+
+    IReadOnlyList<ActivitySession> GetSessionsWithoutOutcome(int limit = 200);
 }
 
-public sealed record SessionBuildResult(int Sealed, int Summarized, int Failed, int Minor);
+public sealed record SessionBuildResult(
+    int Sealed,
+    int Summarized,
+    int Failed,
+    int Minor,
+    int Decided);
 
 /// <summary>
 /// Turns ungrouped captures into summarized sessions: group by time, seal in
@@ -120,12 +127,23 @@ public sealed class SessionBuilder
                         text,
                         cancellationToken)
                     .ConfigureAwait(false);
-                _store.UpsertSession(session with
+                var withSummary = session with
                 {
                     Label = summary.Label,
                     Summary = summary.Summary,
                     ImportantSignals = summary.ImportantSignals,
                     ReminderCandidate = summary.ReminderCandidate
+                };
+
+                // Whether anything was left outstanding, read from the summary
+                // just produced. No extra model call.
+                var (outcome, source) = OutcomeRules.Evaluate(withSummary);
+                _store.UpsertSession(withSummary with
+                {
+                    Outcome = outcome,
+                    OutcomeSource = source,
+                    OutcomeAtMilliseconds =
+                        source == SessionOutcomeSource.None ? null : nowMilliseconds
                 });
                 summarized++;
             }
@@ -140,7 +158,22 @@ public sealed class SessionBuilder
             }
         }
 
-        return new(sealedCount, summarized, failed, minor);
+        // Sessions summarized before outcomes existed, or before this rule
+        // did. Costs no model call, so it can sweep the backlog freely.
+        var decided = 0;
+        foreach (var session in _store.GetSessionsWithoutOutcome())
+        {
+            var (outcome, source) = OutcomeRules.Evaluate(session);
+            _store.UpsertSession(session with
+            {
+                Outcome = outcome,
+                OutcomeSource = source,
+                OutcomeAtMilliseconds = nowMilliseconds
+            });
+            decided++;
+        }
+
+        return new(sealedCount, summarized, failed, minor, decided);
     }
 
     /// <summary>

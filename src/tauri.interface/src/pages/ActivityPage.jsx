@@ -10,6 +10,7 @@ function ActivityPage({
   historySummary,
   history,
   sessions,
+  onSetSessionOutcome,
   pending,
   scanning,
   busy,
@@ -96,7 +97,11 @@ function ActivityPage({
           {(sessions ?? [])
             .filter((session) => !session.isMinor)
             .map((session) => (
-              <SessionCard key={session.id} session={session} />
+              <SessionCard
+                key={session.id}
+                session={session}
+                onSetOutcome={onSetSessionOutcome}
+              />
             ))}
         </div>
         {minorSessions.length > 0 && (

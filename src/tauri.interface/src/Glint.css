@@ -1354,3 +1354,64 @@
 .minor-sessions .scan-list {
   margin-top: 8px;
 }
+
+/* An unfinished session leads with the accent; everything else recedes. */
+.session-card.open-loop {
+  border-left-color: var(--accent-color);
+}
+
+.session-state {
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-left: 8px;
+  padding: 2px 8px;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
+.session-state.open {
+  background: color-mix(in srgb, var(--accent-color) 22%, transparent);
+  color: var(--accent-color);
+}
+
+.session-state.settled {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.session-foot {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+
+.session-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.session-note {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 12px;
+}
+
+.session-action {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.78);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.session-action:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}

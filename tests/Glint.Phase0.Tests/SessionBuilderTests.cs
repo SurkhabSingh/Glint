@@ -89,11 +89,73 @@ public sealed class SessionBuilderTests
         Assert.Equal(1, second.Summarized);
     }
 
+    [Fact]
+    public async Task ASessionThatLeftAReminderIsMarkedUnfinished()
+    {
+        var store = new FakeSessionStore();
+        store.AddCapture("scan-1", Start, "Discord", "Chat", new string('a', 900));
+        var summarizer = new CountingSummarizer
+        {
+            Reminder = "Send Alex the logs before the 10 PM meeting"
+        };
+
+        var result = await new SessionBuilder(store, summarizer)
+            .RunAsync(Start + Sessionizer.QuietTailMilliseconds);
+
+        var session = Assert.Single(store.Sessions.Values);
+        Assert.Equal(SessionOutcome.Open, session.Outcome);
+        Assert.Equal(SessionOutcomeSource.Rule, session.OutcomeSource);
+        Assert.NotNull(session.OutcomeAtMilliseconds);
+        // The verdict came from the summary already paid for.
+        Assert.Equal(1, summarizer.Calls);
+        Assert.Equal(0, result.Decided);
+    }
+
+    [Fact]
+    public async Task ASessionWithNoReminderIsLeftUnknownRatherThanDone()
+    {
+        var store = new FakeSessionStore();
+        store.AddCapture("scan-1", Start, "chrome", "Docs", new string('a', 900));
+
+        await new SessionBuilder(store, new CountingSummarizer())
+            .RunAsync(Start + Sessionizer.QuietTailMilliseconds);
+
+        var session = Assert.Single(store.Sessions.Values);
+        Assert.Equal(SessionOutcome.Unknown, session.Outcome);
+        Assert.NotEqual(SessionOutcome.Settled, session.Outcome);
+    }
+
+    [Fact]
+    public async Task SessionsSummarizedBeforeOutcomesExistedAreSweptUp()
+    {
+        var store = new FakeSessionStore();
+        // A session from before outcomes: summarized, never judged.
+        store.UpsertSession(new ActivitySession(
+            "old-1", Start, Start + 1_000, "Discord", "Chat", ["scan-x"],
+            "Chatting", "The user chatted.", ActivitySessionStatus.Closed,
+            null, "Send the logs tonight"));
+
+        var summarizer = new CountingSummarizer();
+        var result = await new SessionBuilder(store, summarizer)
+            .RunAsync(Start + Sessionizer.QuietTailMilliseconds);
+
+        Assert.Equal(1, result.Decided);
+        Assert.Equal(SessionOutcome.Open, store.Sessions["old-1"].Outcome);
+        // Swept up without re-running the model over it.
+        Assert.Equal(0, summarizer.Calls);
+
+        // And not judged twice.
+        Assert.Equal(0, (await new SessionBuilder(store, summarizer)
+            .RunAsync(Start + Sessionizer.QuietTailMilliseconds)).Decided);
+    }
+
     private sealed class CountingSummarizer : IActivitySummarizer
     {
         public int Calls { get; private set; }
 
         public bool Throw { get; set; }
+
+        public string? Reminder { get; set; }
 
         public string ModelId => "fake";
 
@@ -114,7 +176,8 @@ public sealed class SessionBuilderTests
                 "a label",
                 "a summary",
                 ModelId,
-                TimeSpan.FromSeconds(1)));
+                TimeSpan.FromSeconds(1),
+                ReminderCandidate: Reminder));
         }
     }
 
@@ -159,6 +222,13 @@ public sealed class SessionBuilderTests
             Markers
                 .Where(marker => marker.TimestampMilliseconds >= fromMilliseconds
                     && marker.TimestampMilliseconds <= toMilliseconds)
+                .ToList();
+
+        public IReadOnlyList<ActivitySession> GetSessionsWithoutOutcome(int limit = 200) =>
+            Sessions.Values
+                .Where(session => session.OutcomeSource == SessionOutcomeSource.None
+                    && session.Summary is not null)
+                .Take(limit)
                 .ToList();
 
         public ActivitySession? GetOpenSession() => null;

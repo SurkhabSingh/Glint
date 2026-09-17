@@ -244,7 +244,8 @@ public interface ICaptureEventStore
             """
             SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
                    scan_ids_json, label, summary, status, important_signals,
-                   reminder_candidate, head_text, tail_text, is_minor
+                   reminder_candidate, head_text, tail_text, is_minor,
+                   outcome, outcome_source, outcome_at_ms
             FROM activity_sessions
             WHERE status = 'Active'
             ORDER BY started_at_ms DESC, id DESC
@@ -265,11 +266,13 @@ public interface ICaptureEventStore
             INSERT INTO activity_sessions
                 (id, started_at_ms, ended_at_ms, process_name, window_title,
                  scan_ids_json, label, summary, status, important_signals,
-                 reminder_candidate, head_text, tail_text, is_minor)
+                 reminder_candidate, head_text, tail_text, is_minor,
+                 outcome, outcome_source, outcome_at_ms)
             VALUES
                 ($id, $startedAt, $endedAt, $process, $title,
                  $scanIds, $label, $summary, $status, $importantSignals,
-                 $reminderCandidate, $headText, $tailText, $isMinor)
+                 $reminderCandidate, $headText, $tailText, $isMinor,
+                 $outcome, $outcomeSource, $outcomeAt)
             ON CONFLICT(id) DO UPDATE SET
                 ended_at_ms = excluded.ended_at_ms,
                 scan_ids_json = excluded.scan_ids_json,
@@ -280,7 +283,10 @@ public interface ICaptureEventStore
                 reminder_candidate = excluded.reminder_candidate,
                 head_text = excluded.head_text,
                 tail_text = excluded.tail_text,
-                is_minor = excluded.is_minor;
+                is_minor = excluded.is_minor,
+                outcome = excluded.outcome,
+                outcome_source = excluded.outcome_source,
+                outcome_at_ms = excluded.outcome_at_ms;
             """;
         command.Parameters.AddWithValue("$id", session.Id);
         command.Parameters.AddWithValue("$startedAt", session.StartedAtMilliseconds);
@@ -301,6 +307,11 @@ public interface ICaptureEventStore
         command.Parameters.AddWithValue("$headText", session.HeadText);
         command.Parameters.AddWithValue("$tailText", session.TailText);
         command.Parameters.AddWithValue("$isMinor", session.IsMinor ? 1 : 0);
+        command.Parameters.AddWithValue("$outcome", session.Outcome.ToString());
+        command.Parameters.AddWithValue(
+            "$outcomeSource", session.OutcomeSource.ToString());
+        command.Parameters.AddWithValue(
+            "$outcomeAt", (object?)session.OutcomeAtMilliseconds ?? DBNull.Value);
         command.ExecuteNonQuery();
     }
 
@@ -316,7 +327,8 @@ public interface ICaptureEventStore
             """
             SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
                    scan_ids_json, label, summary, status, important_signals,
-                   reminder_candidate, head_text, tail_text, is_minor
+                   reminder_candidate, head_text, tail_text, is_minor,
+                   outcome, outcome_source, outcome_at_ms
             FROM activity_sessions
             ORDER BY started_at_ms DESC, id DESC
             LIMIT $limit;
@@ -347,7 +359,16 @@ public interface ICaptureEventStore
             reader.IsDBNull(10) ? null : reader.GetString(10),
             reader.IsDBNull(11) ? string.Empty : reader.GetString(11),
             reader.IsDBNull(12) ? string.Empty : reader.GetString(12),
-            !reader.IsDBNull(13) && reader.GetInt64(13) != 0);
+            !reader.IsDBNull(13) && reader.GetInt64(13) != 0,
+            Enum.TryParse<SessionOutcome>(
+                reader.IsDBNull(14) ? null : reader.GetString(14), out var outcome)
+                ? outcome
+                : SessionOutcome.Unknown,
+            Enum.TryParse<SessionOutcomeSource>(
+                reader.IsDBNull(15) ? null : reader.GetString(15), out var outcomeSource)
+                ? outcomeSource
+                : SessionOutcomeSource.None,
+            reader.IsDBNull(16) ? null : reader.GetInt64(16));
 
     /// <summary>
     /// Records that the user went away or came back, or that recording
@@ -361,6 +382,30 @@ public interface ICaptureEventStore
             "INSERT INTO activity_markers (ts_ms, kind) VALUES ($ts, $kind);";
         command.Parameters.AddWithValue("$ts", timestampMilliseconds);
         command.Parameters.AddWithValue("$kind", kind);
+        command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Records the user's own verdict on a session. Marked as coming from the
+    /// user, which no rule may overwrite.
+    /// </summary>
+    public void SetSessionOutcome(
+        string sessionId,
+        SessionOutcome outcome,
+        long atMilliseconds)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            UPDATE activity_sessions
+            SET outcome = $outcome,
+                outcome_source = 'User',
+                outcome_at_ms = $at
+            WHERE id = $id;
+            """;
+        command.Parameters.AddWithValue("$outcome", outcome.ToString());
+        command.Parameters.AddWithValue("$at", atMilliseconds);
+        command.Parameters.AddWithValue("$id", sessionId);
         command.ExecuteNonQuery();
     }
 
@@ -500,6 +545,41 @@ public interface ICaptureEventStore
         transaction.Commit();
     }
 
+    /// <summary>
+    /// Summarized sessions whose outcome has never been looked at. Lets the
+    /// rule reach sessions summarized before outcomes existed, without
+    /// re-running the model over any of them.
+    /// </summary>
+    public IReadOnlyList<ActivitySession> GetSessionsWithoutOutcome(int limit = 200)
+    {
+        if (limit is < 1 or > 1_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
+                   scan_ids_json, label, summary, status, important_signals,
+                   reminder_candidate, head_text, tail_text, is_minor,
+                   outcome, outcome_source, outcome_at_ms
+            FROM activity_sessions
+            WHERE outcome_source = 'None' AND summary IS NOT NULL
+            ORDER BY started_at_ms DESC
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$limit", limit);
+        using var reader = command.ExecuteReader();
+        var sessions = new List<ActivitySession>();
+        while (reader.Read())
+        {
+            sessions.Add(ReadSession(reader));
+        }
+
+        return sessions;
+    }
+
     /// Sessions written but never summarized, oldest first: either the model
     /// failed or the process died between sealing and summarizing.
     public IReadOnlyList<ActivitySession> GetUnsummarizedSessions(int limit = 20)
@@ -514,7 +594,8 @@ public interface ICaptureEventStore
             """
             SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
                    scan_ids_json, label, summary, status, important_signals,
-                   reminder_candidate, head_text, tail_text, is_minor
+                   reminder_candidate, head_text, tail_text, is_minor,
+                   outcome, outcome_source, outcome_at_ms
             FROM activity_sessions
             WHERE summary IS NULL AND status = 'Closed' AND is_minor = 0
             ORDER BY started_at_ms ASC
@@ -944,7 +1025,10 @@ public interface ICaptureEventStore
                 reminder_candidate TEXT,
                 head_text TEXT NOT NULL DEFAULT '',
                 tail_text TEXT NOT NULL DEFAULT '',
-                is_minor INTEGER NOT NULL DEFAULT 0
+                is_minor INTEGER NOT NULL DEFAULT 0,
+                outcome TEXT NOT NULL DEFAULT 'Unknown',
+                outcome_source TEXT NOT NULL DEFAULT 'None',
+                outcome_at_ms INTEGER
             ) STRICT;
 
             CREATE INDEX IF NOT EXISTS idx_activity_sessions_started_at
@@ -960,6 +1044,9 @@ public interface ICaptureEventStore
         // Runs after the table exists, so it only does work when upgrading a
         // store created before this column.
         EnsureActivitySessionColumn("is_minor");
+        EnsureActivitySessionColumn("outcome");
+        EnsureActivitySessionColumn("outcome_source");
+        EnsureActivitySessionColumn("outcome_at_ms");
         Execute(
             """
             INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
@@ -1000,6 +1087,12 @@ public interface ICaptureEventStore
         {
             "is_minor" =>
                 "ALTER TABLE activity_sessions ADD COLUMN is_minor INTEGER NOT NULL DEFAULT 0;",
+            "outcome" =>
+                "ALTER TABLE activity_sessions ADD COLUMN outcome TEXT NOT NULL DEFAULT 'Unknown';",
+            "outcome_source" =>
+                "ALTER TABLE activity_sessions ADD COLUMN outcome_source TEXT NOT NULL DEFAULT 'None';",
+            "outcome_at_ms" =>
+                "ALTER TABLE activity_sessions ADD COLUMN outcome_at_ms INTEGER;",
             _ => throw new ArgumentOutOfRangeException(
                 nameof(columnName),
                 columnName,

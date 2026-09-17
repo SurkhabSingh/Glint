@@ -90,6 +90,37 @@ public enum ActivitySessionStatus
     OpenLoop
 }
 
+/// Whether a session left something outstanding.
+public enum SessionOutcome
+{
+    /// No evidence either way. Shown as unknown, never as done: claiming a
+    /// loop is closed when nothing says so is the one failure that would
+    /// make the feature untrustworthy.
+    Unknown,
+
+    /// Something was left for later.
+    Open,
+
+    /// Nothing outstanding.
+    Settled
+}
+
+/// Where a session's outcome came from, so a weaker source can never
+/// overwrite a stronger one.
+public enum SessionOutcomeSource
+{
+    None,
+
+    /// Derived from the summary the model already produced. A proposal.
+    Rule,
+
+    /// A later session continued or superseded this one.
+    Recurrence,
+
+    /// The user said so. Absolute, and never overridden.
+    User
+}
+
 public sealed record ActivitySession(
     string Id,
     long StartedAtMilliseconds,
@@ -106,7 +137,10 @@ public sealed record ActivitySession(
     string TailText = "",
     // Too little was on screen to be worth a summary, so no model call was
     // made. Distinct from "not summarized yet", which is a pending session.
-    bool IsMinor = false);
+    bool IsMinor = false,
+    SessionOutcome Outcome = SessionOutcome.Unknown,
+    SessionOutcomeSource OutcomeSource = SessionOutcomeSource.None,
+    long? OutcomeAtMilliseconds = null);
 
 public interface ISessionStore
 {

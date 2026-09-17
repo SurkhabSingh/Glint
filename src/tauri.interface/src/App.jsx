@@ -28,6 +28,7 @@ import {
   glintRequestBorderless,
   glintSearch,
   glintSessions,
+  glintSetSessionOutcome,
   glintImportModel,
   glintStartScanning,
   glintPauseScanning,
@@ -173,6 +174,20 @@ function App() {
         // A failed read just leaves the previous list on screen.
       });
   }, []);
+
+  // The user's verdict on a session. Reloads afterwards so the card
+  // reflects what was stored rather than an optimistic guess.
+  const handleSetSessionOutcome = useCallback(
+    async (id, outcome) => {
+      try {
+        await glintSetSessionOutcome(id, outcome);
+      } catch {
+        // Leave the card as it was; the next refresh shows the truth.
+      }
+      refreshSessions();
+    },
+    [refreshSessions],
+  );
 
   // Bootstrap (ports InitializeAsync + LoadScanHistory).
   useEffect(() => {
@@ -509,6 +524,7 @@ function App() {
             historySummary={historySummaryText(history.length)}
             history={history}
             sessions={sessions}
+            onSetSessionOutcome={handleSetSessionOutcome}
             pending={pending}
             scanning={scanning}
             busy={busy}

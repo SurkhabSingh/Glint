@@ -283,6 +283,26 @@ try
             break;
         }
 
+        // The user's own verdict on a session. Absolute: no rule overwrites it.
+        case "session-outcome":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            var sessionId = RequireOption(options, "id");
+            var requested = RequireOption(options, "outcome");
+            if (!Enum.TryParse<SessionOutcome>(requested, ignoreCase: true, out var outcome))
+            {
+                throw new ArgumentException(
+                    $"--outcome must be one of: {string.Join(", ", Enum.GetNames<SessionOutcome>())}.");
+            }
+
+            var decidedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            database.SetSessionOutcome(sessionId, outcome, decidedAt);
+            WriteJson(
+                new { id = sessionId, outcome = outcome.ToString(), decidedAtMilliseconds = decidedAt },
+                json);
+            break;
+        }
+
         // Records that the user went away or came back, or that recording
         // started or stopped. The sessionizer uses these to tell a real break
         // from a screen that simply did not change.
@@ -350,6 +370,7 @@ try
                     built.Summarized,
                     built.Failed,
                     built.Minor,
+                    built.Decided,
                     workerStarts = LiteRtWorkerMetrics.StartCount - startsBefore
                 },
                 json);
@@ -517,6 +538,7 @@ try
                   search-context --query TEXT [--limit 30] [--data-dir PATH]
                   model-probe --runtime PATH --model PATH
                   model-generate --python PATH --worker PATH --model PATH --prompt TEXT [--backend cpu]
+                  session-outcome --id ID --outcome open|settled|unknown [--data-dir PATH]
                   mark --kind run.started|run.stopped|user.away|user.returned [--at MS]
                   sessions [--limit 50] [--data-dir PATH] [--sqlite-vec PATH]
                   sessionize [--max-summaries 5] [--seal-open] [--data-dir PATH] [--sqlite-vec PATH]

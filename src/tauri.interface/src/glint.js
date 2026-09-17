@@ -45,6 +45,8 @@ export const glintOpenSearch = (query = null) =>
 export const glintShowMain = () => invoke("glint_show_main");
 export const glintSessions = (limit = 50) =>
   invoke("glint_sessions", { limit });
+export const glintSetSessionOutcome = (id, outcome) =>
+  invoke("glint_set_session_outcome", { id, outcome });
 
 // ---------------------------------------------------------------------------
 // View-model ports (mirror ManualScanItemViewModel /
@@ -81,6 +83,11 @@ function meaningful(text) {
   return empty.test(trimmed) ? "" : trimmed;
 }
 
+// Enums cross the bridge as their numeric value, like scan.status does, so
+// these must stay in the order the C# enums declare.
+const OUTCOMES = ["unknown", "open", "settled"];
+const OUTCOME_SOURCES = ["none", "rule", "recurrence", "user"];
+
 /** Derived display text for one activity session. */
 export function sessionView(session) {
   const started = session.startedAtMilliseconds;
@@ -90,9 +97,17 @@ export function sessionView(session) {
   const captures = session.scanIds?.length ?? 0;
   const summarized = Boolean(session.summary);
   const minor = Boolean(session.isMinor);
+  const outcome = OUTCOMES[session.outcome ?? 0] ?? "unknown";
+  const outcomeSource = OUTCOME_SOURCES[session.outcomeSource ?? 0] ?? "none";
   return {
     summarized,
     minor,
+    outcome,
+    outcomeSource,
+    outcomeLabel: outcome === "open" ? "Unfinished" : "Done",
+    // Only say where a verdict came from when the user set it, so their own
+    // decision is visibly theirs rather than something Glint guessed.
+    outcomeNote: outcomeSource === "user" ? "You marked this" : "",
     label: session.label ?? session.windowTitle ?? session.processName,
     summary: summarized
       ? session.summary
