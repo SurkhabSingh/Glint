@@ -624,6 +624,11 @@ pub fn start_hook(app: AppHandle) {
         .expect("timeline pump thread");
 }
 
+/// Dropped-hook counter for Diagnostics honesty.
+pub fn dropped_count() -> u64 {
+    DROPPED_HOOKS.load(Ordering::Relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{heartbeat_title, resolve_probe};
@@ -710,9 +715,4 @@ mod tests {
     fn heartbeat_without_any_focus_row_has_no_title() {
         assert_eq!(heartbeat_title(&[], "Code"), None);
     }
-}
-
-/// Dropped-hook counter for Diagnostics honesty.
-pub fn dropped_count() -> u64 {
-    DROPPED_HOOKS.load(Ordering::Relaxed)
 }
