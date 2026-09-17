@@ -8,7 +8,41 @@
 //! 2 = `compatibility --require-ready` not ready.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use tauri::{AppHandle, Manager};
+
+static METRICS_ENABLED: OnceLock<bool> = OnceLock::new();
+
+fn metrics_enabled() -> bool {
+    *METRICS_ENABLED.get_or_init(|| {
+        std::env::var("GLINT_METRICS").map(|v| v.trim() == "1").unwrap_or(false)
+    })
+}
+
+/// Opt-in spawn accounting (`GLINT_METRICS=1`), appended to
+/// `<data_root>/metrics.jsonl` as the before/after baseline for the P1
+/// process-model work.
+///
+/// Content-free by construction: only the verb name is recorded. Other
+/// arguments carry user content (`--prompt`, `--query`) and must never
+/// reach this file.
+pub fn record_spawn(verb: &str, wall_ms: u128, exit: i32, worker_starts: Option<i64>) {
+    if !metrics_enabled() {
+        return;
+    }
+    let Ok(root) = data_root() else {
+        return;
+    };
+    let line = spawn_metric_line(verb, wall_ms, exit, worker_starts);
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("metrics.jsonl"))
+    {
+        let _ = writeln!(file, "{}", serde_json::to_string(&line).unwrap_or_default());
+    }
+}
 
 /// Canonical Phase 0 data root, shared with the WinUI app and the CLI:
 /// `%LOCALAPPDATA%\Glint\Phase0` (`memory.db`, `secrets/dbkey.bin`,
@@ -133,6 +167,24 @@ pub fn sqlite_vec_arg(app: &AppHandle, cli: &std::path::Path) -> Option<String> 
 /// inherit the developer console, which is why it is invisible there.
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// The one row shape written to `metrics.jsonl`. Split out so a test can pin
+/// the fields: nothing here may carry captured content.
+fn spawn_metric_line(
+    verb: &str,
+    wall_ms: u128,
+    exit: i32,
+    worker_starts: Option<i64>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ts_ms": chrono::Utc::now().timestamp_millis(),
+        "kind": "spawn",
+        "verb": verb,
+        "wall_ms": wall_ms as u64,
+        "exit": exit,
+        "workerStarts": worker_starts,
+    })
+}
+
 /// Build a child process that never shows a console window.
 pub fn hidden_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
     let mut command = std::process::Command::new(program);
@@ -165,12 +217,19 @@ pub fn run_sidecar(
     args: &[&str],
 ) -> Result<SidecarOutput, String> {
     let cli = sidecar_path(app)?;
+    let started = std::time::Instant::now();
     let output = hidden_command(&cli)
         .args(args)
         .args(host_args())
         .output()
         .map_err(|error| format!("Failed to launch {}: {error}", cli.display()))?;
     let code = output.status.code().unwrap_or(-1);
+    record_spawn(
+        args.first().copied().unwrap_or("unknown"),
+        started.elapsed().as_millis(),
+        code,
+        None,
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     match serde_json::from_str::<serde_json::Value>(&stdout) {
@@ -212,4 +271,37 @@ pub fn db_args(app: &AppHandle, root: &std::path::Path) -> Vec<String> {
         }
     }
     args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::spawn_metric_line;
+
+    #[test]
+    fn spawn_metrics_carry_only_the_verb() {
+        let line = spawn_metric_line("manual-scan", 1234, 0, Some(2));
+        let object = line.as_object().expect("object");
+
+        let mut keys: Vec<&str> = object.keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["exit", "kind", "ts_ms", "verb", "wall_ms", "workerStarts"]
+        );
+
+        // The verb is the only free-form string, and it is args[0] at every
+        // call site. Nothing may carry a prompt, query, path or title.
+        let strings: Vec<&str> = object.values().filter_map(|v| v.as_str()).collect();
+        assert_eq!(strings, ["spawn", "manual-scan"]);
+
+        assert_eq!(object["wall_ms"], 1234);
+        assert_eq!(object["workerStarts"], 2);
+    }
+
+    #[test]
+    fn spawn_metrics_allow_an_absent_worker_count() {
+        let line = spawn_metric_line("probe", 7, -1, None);
+        assert!(line["workerStarts"].is_null());
+        assert_eq!(line["exit"], -1);
+    }
 }

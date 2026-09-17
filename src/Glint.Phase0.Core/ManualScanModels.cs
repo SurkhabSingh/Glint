@@ -57,7 +57,11 @@ public sealed record ManualScanOutcome(
     ManualScanOutcomeKind Kind,
     string Detail,
     ManualScanRecord? Record = null,
-    SuppressReason? SuppressReason = null);
+    SuppressReason? SuppressReason = null,
+    // Worker processes started while producing this scan: 0 when nothing was
+    // summarized, more than 1 when the summarizer stepped down its context
+    // budget. Each start reloads the model, so this is the cost to watch.
+    long WorkerStarts = 0);
 
 public sealed record ActivitySummary(
     string Label,

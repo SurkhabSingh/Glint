@@ -498,6 +498,7 @@ async fn run_manual_scan(
     // Serialize model loads: no two inference processes at once.
     let model_state: State<ScanRuntime> = app.state();
     let _model = model_state.model_lock.lock().await;
+    let started = std::time::Instant::now();
     let child = tokio::process::Command::new(&cli)
         .args(&args)
         .creation_flags(crate::bridge::CREATE_NO_WINDOW)
@@ -554,7 +555,18 @@ async fn run_manual_scan(
     if !is_current(app, generation) {
         return None; // finished stale: discard, like a cancelled loop iteration
     }
-    serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&output.stdout)).ok()
+    let parsed =
+        serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&output.stdout)).ok();
+    crate::bridge::record_spawn(
+        "manual-scan",
+        started.elapsed().as_millis(),
+        output.status.code().unwrap_or(-1),
+        parsed
+            .as_ref()
+            .and_then(|v| v.get("workerStarts"))
+            .and_then(|v| v.as_i64()),
+    );
+    parsed
 }
 
 async fn scan_loop(app: AppHandle, generation: u64) {
@@ -1146,12 +1158,19 @@ pub async fn glint_capture_once(app: AppHandle) -> Result<serde_json::Value, Str
     // Serialize model loads: no two inference processes at once.
     let model_state: State<ScanRuntime> = app.state();
     let _model = model_state.model_lock.lock().await;
+    let started = std::time::Instant::now();
     let output = tokio::task::spawn_blocking(move || {
         crate::bridge::hidden_command(&cli).args(&args).output()
     })
     .await
     .map_err(|error| format!("Capture task failed: {error}"))?
     .map_err(|error| format!("Capture failed to launch: {error}"))?;
+    crate::bridge::record_spawn(
+        "manual-scan",
+        started.elapsed().as_millis(),
+        output.status.code().unwrap_or(-1),
+        None,
+    );
     let outcome: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
             .map_err(|_| {
@@ -1448,6 +1467,7 @@ pub async fn glint_ask(
             prompt.clone(),
         ];
         let blocking_app = app.clone();
+        let started = std::time::Instant::now();
         let output = tokio::task::spawn_blocking(move || {
             let cli = crate::bridge::sidecar_path(&blocking_app)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
@@ -1457,6 +1477,12 @@ pub async fn glint_ask(
         .await
         .map_err(|error| format!("Agent task failed: {error}"))?
         .map_err(|error| format!("Agent failed to launch: {error}"))?;
+        crate::bridge::record_spawn(
+            "model-generate",
+            started.elapsed().as_millis(),
+            output.status.code().unwrap_or(-1),
+            None,
+        );
         match serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&output.stdout)) {
             Ok(value) => {
                 generated = Some(value);

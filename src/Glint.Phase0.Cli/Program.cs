@@ -237,8 +237,14 @@ try
                     resolution.ModelPath!,
                     resolution.ModelId),
                 database);
+            var workerStartsBefore = LiteRtWorkerClient.StartCount;
             var outcome = await coordinator.ScanAsync();
-            WriteJson(outcome, json);
+            WriteJson(
+                outcome with
+                {
+                    WorkerStarts = LiteRtWorkerClient.StartCount - workerStartsBefore
+                },
+                json);
             break;
         }
 

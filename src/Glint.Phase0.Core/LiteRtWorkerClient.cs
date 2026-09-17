@@ -29,6 +29,12 @@ public sealed class LiteRtWorkerClient : ILiteRtGenerator
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
 
+    private static long _startCount;
+
+    /// Worker processes started in this process so far. Each start reloads
+    /// the model, so this is the headline cost of the per-request worker.
+    public static long StartCount => System.Threading.Interlocked.Read(ref _startCount);
+
     private readonly string _pythonExecutable;
     private readonly string _workerScript;
     private readonly string _modelPath;
@@ -95,6 +101,7 @@ public sealed class LiteRtWorkerClient : ILiteRtGenerator
 
         using var process = Process.Start(start)
             ?? throw new InvalidOperationException("LiteRT-LM worker could not be started.");
+        System.Threading.Interlocked.Increment(ref _startCount);
         var processTimer = Stopwatch.StartNew();
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
