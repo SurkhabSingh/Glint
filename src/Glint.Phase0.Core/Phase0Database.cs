@@ -287,7 +287,7 @@ public interface ICaptureEventStore
         command.Parameters.AddWithValue("$process", session.ProcessName);
         command.Parameters.AddWithValue("$title", session.WindowTitle);
         command.Parameters.AddWithValue(
-            "$scanIds", SessionManager.SerializeScanIds(session.ScanIds));
+            "$scanIds", SessionScanIds.Serialize(session.ScanIds));
         command.Parameters.AddWithValue("$label", (object?)session.Label ?? DBNull.Value);
         command.Parameters.AddWithValue("$summary", (object?)session.Summary ?? DBNull.Value);
         command.Parameters.AddWithValue("$status", session.Status.ToString());
@@ -337,7 +337,7 @@ public interface ICaptureEventStore
             reader.GetInt64(2),
             reader.GetString(3),
             reader.GetString(4),
-            SessionManager.DeserializeScanIds(reader.GetString(5)),
+            SessionScanIds.Deserialize(reader.GetString(5)),
             reader.IsDBNull(6) ? null : reader.GetString(6),
             reader.IsDBNull(7) ? null : reader.GetString(7),
             Enum.Parse<ActivitySessionStatus>(reader.GetString(8), ignoreCase: false),

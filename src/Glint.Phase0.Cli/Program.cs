@@ -216,24 +216,10 @@ try
         case "manual-scan":
         {
             await DelayAsync(options);
-            var resolution = LiteRtRuntimeLocator.Resolve(AppContext.BaseDirectory, dataRoot);
-            if (!resolution.IsReady)
-            {
-                throw new InvalidOperationException(
-                    $"Gemma runtime is not ready. Missing: {string.Join(", ", resolution.Missing)}.");
-            }
-
+            // Capture no longer runs the model, so it does not need the Gemma
+            // runtime and works even before one is installed. Summaries
+            // arrive per session, from the sessionize verb.
             using var database = OpenDatabase(dataRoot, options);
-            // One worker for the whole scan: the summarizer retries at 4000,
-            // 2000 and 1000 context characters, which used to mean up to
-            // three process starts and three model loads for a single scan.
-            // Idle unload is off because this process is short-lived anyway.
-            using var scanWorker = new PersistentLiteRtWorker(
-                resolution.PythonExecutable!,
-                resolution.WorkerScript!,
-                resolution.ModelPath!,
-                maxNumTokens: 4096,
-                idleUnloadAfter: Timeout.InfiniteTimeSpan);
             var coordinator = new ManualScanCoordinator(
                 new ForegroundWindowInspector(HostProcessId(options)),
                 new UiAutomationService(),
@@ -241,16 +227,8 @@ try
                 new WindowsGraphicsCaptureService(
                     options.ContainsKey("software-device")),
                 new DeterministicRedactor(),
-                new LiteRtActivitySummarizer(scanWorker, resolution.ModelId),
                 database);
-            var workerStartsBefore = LiteRtWorkerMetrics.StartCount;
-            var outcome = await coordinator.ScanAsync();
-            WriteJson(
-                outcome with
-                {
-                    WorkerStarts = LiteRtWorkerMetrics.StartCount - workerStartsBefore
-                },
-                json);
+            WriteJson(await coordinator.ScanAsync(), json);
             break;
         }
 

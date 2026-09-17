@@ -5,7 +5,7 @@ namespace Glint.Phase0.Tests;
 public sealed class ManualScanCoordinatorTests
 {
     [Fact]
-    public async Task RedactsBeforeGemmaAndPersistsCompletedSummary()
+    public async Task RedactsBeforeStoringAndLabelsWithoutTheModel()
     {
         var summarizer = new FakeSummarizer();
         var store = new FakeStore();
@@ -19,13 +19,19 @@ public sealed class ManualScanCoordinatorTests
         var outcome = await coordinator.ScanAsync();
 
         Assert.Equal(ManualScanOutcomeKind.Completed, outcome.Kind);
-        Assert.DoesNotContain("topsecret", summarizer.Input, StringComparison.Ordinal);
-        Assert.DoesNotContain("user@example.com", summarizer.Input, StringComparison.Ordinal);
-        Assert.Contains("[REDACTED:", summarizer.Input, StringComparison.Ordinal);
+        // Capture makes no model call at all now; summaries come per session.
+        Assert.Equal(0, summarizer.CallCount);
         var saved = Assert.Single(store.Scans);
-        Assert.Equal("Editing Windows capture", saved.Scan.Label);
-        Assert.Equal("Meeting tomorrow at 10 PM.", saved.Scan.ImportantSignals);
-        Assert.Equal("Remind the user about the 10 PM meeting tomorrow.", saved.Scan.ReminderCandidate);
+        // The label costs nothing and describes the window until its session
+        // is summarized.
+        Assert.Equal("README.md - Visual Studio Code", saved.Scan.Label);
+        Assert.Null(saved.Scan.Summary);
+        Assert.Null(saved.Scan.ImportantSignals);
+        Assert.Null(saved.Scan.ReminderCandidate);
+        Assert.Null(saved.Scan.SessionId);
+        Assert.DoesNotContain("topsecret", saved.Scan.RedactedInputText, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "user@example.com", saved.Scan.RedactedInputText, StringComparison.Ordinal);
         Assert.Contains("[REDACTED:", saved.Scan.RedactedInputText, StringComparison.Ordinal);
         Assert.Contains("[REDACTED:", saved.Scan.RedactedUiAutomationText, StringComparison.Ordinal);
         Assert.Contains("[REDACTED:", saved.Scan.RedactedOcrText, StringComparison.Ordinal);
@@ -34,8 +40,10 @@ public sealed class ManualScanCoordinatorTests
     }
 
     [Fact]
-    public async Task ModelFailureStillPersistsTimestampedCapture()
+    public async Task CaptureSucceedsEvenWhenTheModelIsUnusable()
     {
+        // Capture never touches the model, so a broken or missing runtime
+        // can no longer cost a capture. It used to be stored as ModelFailed.
         var summarizer = new FakeSummarizer(new InvalidOperationException("runtime failed"));
         var store = new FakeStore();
         var coordinator = Coordinator(
@@ -47,15 +55,16 @@ public sealed class ManualScanCoordinatorTests
 
         var outcome = await coordinator.ScanAsync();
 
-        Assert.Equal(ManualScanOutcomeKind.ModelFailed, outcome.Kind);
+        Assert.Equal(ManualScanOutcomeKind.Completed, outcome.Kind);
         var saved = Assert.Single(store.Scans);
-        Assert.Equal(ManualScanStatus.ModelFailed, saved.Scan.Status);
-        Assert.Contains("runtime failed", saved.Scan.Error, StringComparison.Ordinal);
+        Assert.Equal(ManualScanStatus.Completed, saved.Scan.Status);
+        Assert.Null(saved.Scan.Error);
+        Assert.Equal(0, summarizer.CallCount);
         Assert.True(saved.Scan.CapturedAtMilliseconds > 0);
     }
 
     [Fact]
-    public async Task UnchangedContentDoesNotRunGemmaOrCreateAnotherHistoryItem()
+    public async Task UnchangedContentDoesNotCreateAnotherHistoryItem()
     {
         var summarizer = new FakeSummarizer();
         var store = new FakeStore();
@@ -71,7 +80,7 @@ public sealed class ManualScanCoordinatorTests
 
         Assert.Equal(ManualScanOutcomeKind.Completed, first.Kind);
         Assert.Equal(ManualScanOutcomeKind.Unchanged, second.Kind);
-        Assert.Equal(1, summarizer.CallCount);
+        Assert.Equal(0, summarizer.CallCount);
         Assert.Single(store.Scans);
     }
 
@@ -90,7 +99,6 @@ public sealed class ManualScanCoordinatorTests
             new PrivacyGate(),
             capture,
             new DeterministicRedactor(),
-            summarizer,
             store);
 
         var outcome = await coordinator.ScanAsync();
@@ -197,7 +205,6 @@ public sealed class ManualScanCoordinatorTests
             new PrivacyGate(),
             new FakeCapture(ocrText),
             new DeterministicRedactor(),
-            summarizer,
             store);
 
     private static ForegroundWindowInfo Window() =>

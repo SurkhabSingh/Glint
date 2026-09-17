@@ -424,6 +424,8 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
+    // Capture is model-free now; summaries are produced per session by
+    // SessionBuilder, so the runtime is no longer needed here.
     private static ManualScanCoordinator CreateCoordinator(
         LiteRtRuntimeResolution runtime,
         Phase0Database database) =>
@@ -433,12 +435,6 @@ public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
             new PrivacyGate(),
             new WindowsGraphicsCaptureService(),
             new DeterministicRedactor(),
-            new LiteRtActivitySummarizer(
-                runtime.PythonExecutable!,
-                runtime.WorkerScript!,
-                runtime.ModelPath!,
-                runtime.ModelId),
-            database,
             database);
 
     private async Task<ManualScanOutcome> RunScanOnceAsync(

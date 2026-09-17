@@ -10,9 +10,7 @@ public sealed class ManualScanCoordinator
     private readonly PrivacyGate _privacyGate;
     private readonly IOcrCaptureService _capture;
     private readonly DeterministicRedactor _redactor;
-    private readonly IActivitySummarizer _summarizer;
     private readonly IManualScanStore _store;
-    private readonly SessionManager? _sessions;
 
     public ManualScanCoordinator(
         IForegroundWindowInspector windowInspector,
@@ -20,19 +18,21 @@ public sealed class ManualScanCoordinator
         PrivacyGate privacyGate,
         IOcrCaptureService capture,
         DeterministicRedactor redactor,
-        IActivitySummarizer summarizer,
-        IManualScanStore store,
-        ISessionStore? sessions = null)
+        IManualScanStore store)
     {
         _windowInspector = windowInspector;
         _automation = automation;
         _privacyGate = privacyGate;
         _capture = capture;
         _redactor = redactor;
-        _summarizer = summarizer;
         _store = store;
-        _sessions = sessions is null ? null : new SessionManager(sessions, summarizer);
     }
+
+    /// A label for a capture that costs no model call: the window title, or
+    /// the app when the window has no title. Replaced for the whole stretch
+    /// once its session is summarized.
+    internal static string LiveLabel(string processName, string windowTitle) =>
+        string.IsNullOrWhiteSpace(windowTitle) ? processName : windowTitle.Trim();
 
     public async Task<ManualScanOutcome> ScanAsync(
         CancellationToken cancellationToken = default)
@@ -102,81 +102,43 @@ public sealed class ManualScanCoordinator
                 redacted.Text,
                 redacted.Total);
 
-            ActivitySummary? summary = null;
-            string? modelError = null;
-            try
-            {
-                summary = await _summarizer.SummarizeAsync(
-                        capturedAt,
-                        window.ProcessName,
-                        window.Title,
-                        redacted.Text,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception error)
-            {
-                modelError = $"{error.GetType().Name}: {error.Message}";
-            }
-
-            // Session assignment precedes persistence so the saved record
-            // already carries its session. Absent a session store (unit
-            // tests, older callers) the scan simply stays ungrouped.
-            var scanId = Guid.NewGuid().ToString("N");
-            string? sessionId = null;
-            if (_sessions is not null)
-            {
-                var tracked = await _sessions.TrackScanAsync(
-                        scanId,
-                        window.ProcessName,
-                        window.Title,
-                        capturedAt.ToUnixTimeMilliseconds(),
-                        redacted.Text,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                sessionId = tracked.SessionId;
-            }
-
+            // No model call here. A capture used to cost one summary of its
+            // own, measured at ~9.9 s of inference, so typing in a window
+            // meant a model call per tick. Summaries are produced once per
+            // session by SessionBuilder instead; until that runs, the card
+            // carries a label derived from the window, which costs nothing
+            // and is accurate.
             var scan = new ManualScanRecord(
-                scanId,
+                Guid.NewGuid().ToString("N"),
                 capturedAt.ToUnixTimeMilliseconds(),
                 window.ProcessName,
                 window.Title,
-                summary?.Label,
-                summary?.Summary,
-                summary is null ? ManualScanStatus.ModelFailed : ManualScanStatus.Completed,
-                modelError,
+                LiveLabel(window.ProcessName, window.Title),
+                null,
+                ManualScanStatus.Completed,
+                null,
                 contentHash,
-                summary?.ModelId ?? _summarizer.ModelId,
+                string.Empty,
                 automationText.Text.Length,
                 ocr.Text.Length,
                 redacted.Total,
                 ocr.CaptureElapsed.TotalMilliseconds,
                 ocr.OcrElapsed.TotalMilliseconds,
-                summary?.Elapsed.TotalMilliseconds ?? 0,
-                summary?.ImportantSignals,
-                summary?.ReminderCandidate,
-                summary?.ContextCharacters ?? 0,
+                0,
+                null,
+                null,
+                0,
                 redacted.Text,
                 redactedUiAutomation.Text,
                 redactedOcr.Text,
                 ocr.RecognizerLanguage,
-                SessionId: sessionId);
+                SessionId: null);
             _store.SaveManualScan(captureEvent, scan);
 
-            return summary is null
-                ? new(
-                    ManualScanOutcomeKind.ModelFailed,
-                    $"OCR was captured and stored, but Gemma failed: {modelError}",
-                    scan)
-                : new(
-                    ManualScanOutcomeKind.Completed,
-                    "OCR was redacted, summarized locally, and stored.",
-                    scan);
+            return new(
+                ManualScanOutcomeKind.Completed,
+                "Screen text was redacted and stored.",
+                scan);
         }
         catch (OperationCanceledException)
         {
