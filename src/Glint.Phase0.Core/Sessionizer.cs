@@ -74,10 +74,8 @@ public static class Sessionizer
 
         foreach (var capture in ordered.Skip(1))
         {
-            var previous = current[^1];
-            var gap = capture.CapturedAtMilliseconds - previous.CapturedAtMilliseconds;
-            var span = capture.CapturedAtMilliseconds - current[0].CapturedAtMilliseconds;
-            if (gap > IdleGapMilliseconds || span > MaxSessionMilliseconds)
+            var gap = capture.CapturedAtMilliseconds - current[^1].CapturedAtMilliseconds;
+            if (gap > IdleGapMilliseconds)
             {
                 groups.Add(current);
                 current = [capture];
@@ -89,6 +87,11 @@ public static class Sessionizer
 
         groups.Add(current);
 
+        // Apply the length cap only after the natural boundaries are known, so
+        // an over-long stretch is cut at its widest internal pause instead of
+        // wherever the 45-minute mark happens to fall.
+        groups = groups.SelectMany(SplitToCap).ToList();
+
         // The last group is the only one that can still be growing: every
         // earlier group is already followed by a boundary.
         var last = groups[^1];
@@ -98,6 +101,48 @@ public static class Sessionizer
         }
 
         return groups.Select(ToDraft).ToList();
+    }
+
+    /// <summary>
+    /// Cuts a stretch that outran the cap, recursively, at its widest internal
+    /// pause. Splitting at the cap itself would put the boundary in the middle
+    /// of whatever the user happened to be doing 45 minutes in.
+    /// </summary>
+    private static IEnumerable<List<CaptureRow>> SplitToCap(List<CaptureRow> group)
+    {
+        var span = group[^1].CapturedAtMilliseconds - group[0].CapturedAtMilliseconds;
+        if (span <= MaxSessionMilliseconds || group.Count < 2)
+        {
+            yield return group;
+            yield break;
+        }
+
+        var middle = group.Count / 2;
+        var splitIndex = 1;
+        var widest = long.MinValue;
+        for (var index = 1; index < group.Count; index++)
+        {
+            var gap = group[index].CapturedAtMilliseconds
+                - group[index - 1].CapturedAtMilliseconds;
+            // Ties favour the middle, so an evenly paced stretch halves rather
+            // than shedding one capture at a time.
+            var closerToMiddle = Math.Abs(index - middle) < Math.Abs(splitIndex - middle);
+            if (gap > widest || (gap == widest && closerToMiddle))
+            {
+                widest = gap;
+                splitIndex = index;
+            }
+        }
+
+        foreach (var part in SplitToCap(group[..splitIndex]))
+        {
+            yield return part;
+        }
+
+        foreach (var part in SplitToCap(group[splitIndex..]))
+        {
+            yield return part;
+        }
     }
 
     private static SessionDraft ToDraft(List<CaptureRow> group) =>

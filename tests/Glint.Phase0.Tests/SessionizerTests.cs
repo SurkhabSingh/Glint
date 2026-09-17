@@ -119,6 +119,32 @@ public sealed class SessionizerTests
     }
 
     [Fact]
+    public void AnOverlongStretchIsCutAtItsWidestPause()
+    {
+        // Half an hour of work, a four-minute pause (short of the idle
+        // threshold, so it is not a boundary on its own), then another half
+        // hour. The whole thing outruns the cap and must be cut at the pause,
+        // not at whatever was happening 45 minutes in.
+        List<CaptureRow> captures = [];
+        for (var minute = 0; minute <= 30; minute += 2)
+        {
+            captures.Add(Capture(minute * 60_000));
+        }
+
+        const long resumeMinute = 34;
+        for (var minute = resumeMinute; minute <= 64; minute += 2)
+        {
+            captures.Add(Capture(minute * 60_000));
+        }
+
+        var sessions = Sessionizer.Cluster(captures, Quiet(64 * 60_000));
+
+        Assert.Equal(2, sessions.Count);
+        Assert.Equal(Start + (30 * 60_000), sessions[0].EndedAtMilliseconds);
+        Assert.Equal(Start + (resumeMinute * 60_000), sessions[1].StartedAtMilliseconds);
+    }
+
+    [Fact]
     public void TheNewestStretchIsLeftAloneWhileItMayStillBeGrowing()
     {
         List<CaptureRow> captures = [Capture(0), Capture(1_000)];
