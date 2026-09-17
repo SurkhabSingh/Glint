@@ -111,6 +111,29 @@ fn log_ask_failure(question: &str, prompt_chars: usize, scoped_count: usize, det
     }
 }
 
+/// Wording for the selected scope, so a week or all-history answer is not
+/// narrated as "today".
+fn scope_phrases(scope: &str) -> (&'static str, &'static str) {
+    match scope {
+        "week" => ("this week", "Here's what you did this week~!"),
+        "all" => ("across your history", "Here's what you've been up to~!"),
+        _ => ("today", "Here's what you did today~!"),
+    }
+}
+
+/// Whether a second worker could plausibly succeed. Deterministic failures
+/// fail the same way twice, and each retry costs a process spawn plus a full
+/// ~2.5 GB model load, so they are not worth repeating.
+fn is_retryable(stderr: &str) -> bool {
+    let raw = stderr.to_ascii_lowercase();
+    let deterministic = [
+        "prompt too large",
+        "prompt cannot be empty",
+        "runtime is not ready",
+    ];
+    !deterministic.iter().any(|needle| raw.contains(needle))
+}
+
 /// Translate raw worker/sidecar stderr into something actionable while
 /// keeping the technical detail for diagnosis (capped in length).
 fn friendly_model_error(stderr: &str) -> String {
@@ -1385,9 +1408,10 @@ pub async fn glint_ask(
         index += 1;
     }
 
+    let (period, opener) = scope_phrases(&scope);
     let prompt = format!(
-        "You narrate the user's day from their activity log. Write like this: \
-         \"Here's what you did today~! You played Stellar Blade for 5 mins, \
+        "You narrate the user's activity {period} from their activity log. Write like this: \
+         \"{opener} You played Stellar Blade for 5 mins, \
          you compared LLM models for about 3-4 mins...\" Then a 'Summary:' \
          line with 3-6 dash-led bullet points (- ...) of key facts with [n] \
          citations. Rules: every activity gets its GIVEN duration — never \
@@ -1398,14 +1422,14 @@ pub async fn glint_ask(
     );
 
     // 4. Generate via the existing model-generate verb (5 min cap inside).
-    // Serialized with scan ticks (one model load at a time) and retried
-    // once: native worker failures are usually transient (RAM contention
-    // from an overlapping load, AV holds, cold-start races).
+    // Serialized with scan ticks (one model load at a time). Transient
+    // native worker failures (RAM contention from an overlapping load, AV
+    // holds, cold-start races) are retried once; deterministic ones are not.
     let model_state: State<ScanRuntime> = app.state();
     let _model = model_state.model_lock.lock().await;
     let mut last_error = "The local model produced no output.".to_string();
     let mut generated: Option<serde_json::Value> = None;
-    for _ in 0..2 {
+    for attempt in 0..2 {
         let args = vec![
             "model-generate".to_string(),
             "--python".to_string(),
@@ -1416,6 +1440,10 @@ pub async fn glint_ask(
             model.clone(),
             "--backend".to_string(),
             "cpu".to_string(),
+            // model-generate defaults to 2048, which caps input + output
+            // together; the summarizer already runs 4096 on this hardware.
+            "--max-tokens".to_string(),
+            "4096".to_string(),
             "--prompt".to_string(),
             prompt.clone(),
         ];
@@ -1435,7 +1463,13 @@ pub async fn glint_ask(
                 break;
             }
             Err(_) => {
-                last_error = friendly_model_error(&String::from_utf8_lossy(&output.stderr));
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                last_error = friendly_model_error(&stderr);
+                // A deterministic failure repeats, so skip the second
+                // spawn and its full model load.
+                if attempt == 0 && !is_retryable(&stderr) {
+                    break;
+                }
             }
         }
     }
@@ -1500,3 +1534,35 @@ pub fn glint_timeline(app: AppHandle, date: Option<String>) -> Result<serde_json
     }))
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::{is_retryable, scope_phrases};
+
+    #[test]
+    fn scope_wording_follows_the_selected_range() {
+        assert_eq!(scope_phrases("day").0, "today");
+        assert_eq!(scope_phrases("week").0, "this week");
+        assert_eq!(scope_phrases("all").0, "across your history");
+        // Unknown scopes fall back to the day wording, matching in_scope.
+        assert_eq!(scope_phrases("nonsense").0, "today");
+        assert!(scope_phrases("week").1.contains("this week"));
+    }
+
+    #[test]
+    fn deterministic_failures_are_not_retried() {
+        assert!(!is_retryable(
+            "Prompt too large for the local worker: ~2100 estimated input tokens exceed the ~1,600-token budget."
+        ));
+        assert!(!is_retryable("Gemma runtime is not ready. Missing: model."));
+        assert!(!is_retryable("Prompt cannot be empty."));
+    }
+
+    #[test]
+    fn transient_failures_are_retried() {
+        assert!(is_retryable("litert_lm_conversation_send_message failed"));
+        assert!(is_retryable("LiteRT-LM worker exited unexpectedly"));
+        assert!(is_retryable("timed out"));
+        assert!(is_retryable(""));
+    }
+}
