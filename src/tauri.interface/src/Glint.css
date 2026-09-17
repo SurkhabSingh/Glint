@@ -1276,3 +1276,57 @@
   font-size: 12px;
   margin-top: auto;
 }
+
+/* Sessions: a stretch of work, summarized once. Visually heavier than a
+   capture card, because this is the unit worth reading. */
+.session-card {
+  background: var(--card-bg);
+  border: var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-highlight), var(--card-shadow);
+  border-left: 3px solid var(--accent-color);
+  padding: 16px;
+}
+
+.session-card.unsummarized {
+  border-left-color: rgba(255, 255, 255, 0.22);
+}
+
+.session-card .session-head {
+  align-items: baseline;
+  color: rgba(255, 255, 255, 0.55);
+  display: flex;
+  font-size: 12px;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.session-card .session-meta {
+  white-space: nowrap;
+}
+
+.session-card .session-label {
+  font-size: 19px;
+  font-weight: 600;
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.session-card .session-summary {
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.session-card.unsummarized .session-summary {
+  color: rgba(255, 255, 255, 0.5);
+  font-style: italic;
+}
+
+.session-card .session-source {
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 13px;
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+}

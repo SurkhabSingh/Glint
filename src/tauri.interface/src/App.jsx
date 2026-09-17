@@ -27,6 +27,7 @@ import {
   glintCheckCompatibility,
   glintRequestBorderless,
   glintSearch,
+  glintSessions,
   glintImportModel,
   glintStartScanning,
   glintPauseScanning,
@@ -99,6 +100,7 @@ function App() {
   const [settingUp, setSettingUp] = useState(false);
   const [setupLog, setSetupLog] = useState([]);
   const [pending, setPending] = useState([]);
+  const [sessions, setSessions] = useState([]);
 
   const safeTheme = sanitizeTheme(theme);
   const windowBg = hexToRgba(safeTheme.bg, safeTheme.bgAlpha);
@@ -162,6 +164,16 @@ function App() {
     }
   }, []);
 
+  // Sessions are rebuilt by the scan loop between captures, so the page
+  // reloads them on the sessions-updated event rather than polling.
+  const refreshSessions = useCallback(() => {
+    glintSessions(50)
+      .then((payload) => setSessions(payload?.sessions ?? []))
+      .catch(() => {
+        // A failed read just leaves the previous list on screen.
+      });
+  }, []);
+
   // Bootstrap (ports InitializeAsync + LoadScanHistory).
   useEffect(() => {
     if (windowLabel !== "main") return;
@@ -177,6 +189,7 @@ function App() {
         setHistory(init.history ?? []);
         setRuntime(init.runtime ?? null);
         setInitializing(false);
+        refreshSessions();
       })
       .catch((error) => {
         if (cancelled) return;
@@ -190,7 +203,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [windowLabel]);
+  }, [windowLabel, refreshSessions]);
 
   // Bridge + shell events.
   useEffect(() => {
@@ -199,6 +212,7 @@ function App() {
     let unlistenState;
     let unlistenSearch;
     let unlistenTick;
+    let unlistenSessions;
     listen("scan-tick-started", (event) => {
       const tick = event.payload;
       if (tick?.tickId == null) return;
@@ -211,6 +225,11 @@ function App() {
     );
     listen("scan-state", (event) => applyScanState(event.payload)).then(
       (fn) => (unlistenState = fn),
+    );
+    // Emitted whenever the loop groups captures into sessions, and once more
+    // when scanning stops.
+    listen("sessions-updated", () => refreshSessions()).then(
+      (fn) => (unlistenSessions = fn),
     );
     listen("open-search", (event) => {
       const next = event.payload?.query ?? null;
@@ -229,8 +248,9 @@ function App() {
       unlistenState?.();
       unlistenSearch?.();
       unlistenTick?.();
+      unlistenSessions?.();
     };
-  }, [windowLabel, applyOutcome, applyScanState, runSearch]);
+  }, [windowLabel, applyOutcome, applyScanState, runSearch, refreshSessions]);
 
   const minimize = useCallback(async () => {
     try {
@@ -488,6 +508,7 @@ function App() {
             captureSummary={captureSummary}
             historySummary={historySummaryText(history.length)}
             history={history}
+            sessions={sessions}
             pending={pending}
             scanning={scanning}
             busy={busy}

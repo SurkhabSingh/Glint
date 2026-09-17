@@ -480,6 +480,17 @@ async fn heartbeat_loop(app: AppHandle, generation: u64) {
     }
 }
 
+/// Sessions with their summaries, newest first.
+#[tauri::command(async)]
+pub fn glint_sessions(app: AppHandle, limit: Option<u32>) -> Result<serde_json::Value, String> {
+    let root = crate::bridge::data_root()?;
+    let requested = limit.unwrap_or(50).clamp(1, 200).to_string();
+    let mut args = vec!["sessions".to_string(), "--limit".to_string(), requested];
+    args.extend(crate::bridge::db_args(&app, &root));
+    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
+    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+}
+
 /// How often the loop groups captures into sessions and summarizes them.
 const SESSIONIZE_INTERVAL_MS: u64 = 60_000;
 

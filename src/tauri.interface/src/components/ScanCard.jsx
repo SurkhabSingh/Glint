@@ -17,8 +17,8 @@ export function PendingScanCard({ tick }) {
         <span className="scan-label">Capturing {tick.process ?? "current window"}…</span>
       </div>
       <div className="scan-summary">
-        Reading on-screen activity now — the summary lands here when local
-        inference finishes.
+        Reading on-screen text now. Capture no longer waits on the model; the
+        summary arrives with this stretch's session.
       </div>
       <div className="scan-source">{source}</div>
     </div>

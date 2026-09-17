@@ -283,6 +283,18 @@ try
             break;
         }
 
+        // Sessions, newest first, with their summaries. The UI shows these
+        // rather than per-capture rows.
+        case "sessions":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            var sessionLimit = int.TryParse(options.GetValueOrDefault("limit"), out var parsedLimit)
+                ? Math.Clamp(parsedLimit, 1, 200)
+                : 50;
+            WriteJson(new { sessions = database.GetRecentSessions(sessionLimit) }, json);
+            break;
+        }
+
         // Groups ungrouped captures into sessions and summarizes them: one
         // model call per session rather than one per capture. Safe to run
         // repeatedly; sessions still in progress are left alone.
@@ -489,6 +501,7 @@ try
                   search-context --query TEXT [--limit 30] [--data-dir PATH]
                   model-probe --runtime PATH --model PATH
                   model-generate --python PATH --worker PATH --model PATH --prompt TEXT [--backend cpu]
+                  sessions [--limit 50] [--data-dir PATH] [--sqlite-vec PATH]
                   sessionize [--max-summaries 5] [--seal-open] [--data-dir PATH] [--sqlite-vec PATH]
                   worker-bench [--runs 3] [--prompt TEXT] [--max-tokens 4096] [--data-dir PATH]
                   activity-summarize --text TEXT [--process NAME] [--title TITLE]

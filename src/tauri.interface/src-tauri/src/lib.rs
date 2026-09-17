@@ -292,6 +292,7 @@ pub fn run() {
             glint::glint_request_borderless,
             glint::glint_search,
             glint::glint_history,
+            glint::glint_sessions,
             glint::glint_import_model,
             glint::glint_start_scanning,
             glint::glint_pause_scanning,

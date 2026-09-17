@@ -43,6 +43,8 @@ export const glintCaptureOnce = () => invoke("glint_capture_once");
 export const glintOpenSearch = (query = null) =>
   invoke("glint_open_search", { query });
 export const glintShowMain = () => invoke("glint_show_main");
+export const glintSessions = (limit = 50) =>
+  invoke("glint_sessions", { limit });
 
 // ---------------------------------------------------------------------------
 // View-model ports (mirror ManualScanItemViewModel /
@@ -68,24 +70,68 @@ export function formatTimestamp(capturedAtMs) {
   return `${month} ${day}, ${year} ${hours}:${pad(date.getMinutes())}:${pad(date.getSeconds())} ${ampm}`;
 }
 
+/**
+ * Model output that says nothing. The summarizer emits a full sentence when
+ * it found no commitments or deadlines, which is noise on every card.
+ */
+function meaningful(text) {
+  const trimmed = (text ?? "").trim();
+  if (!trimmed) return "";
+  const empty = /^(none|n\/a|no explicit|no commitments|nothing)\b/i;
+  return empty.test(trimmed) ? "" : trimmed;
+}
+
+/** Derived display text for one activity session. */
+export function sessionView(session) {
+  const started = session.startedAtMilliseconds;
+  const ended = session.endedAtMilliseconds;
+  const minutes = Math.round((ended - started) / 60000);
+  const duration = minutes >= 1 ? `${minutes} min` : "under a minute";
+  const captures = session.scanIds?.length ?? 0;
+  const summarized = Boolean(session.summary);
+  return {
+    summarized,
+    label: session.label ?? session.windowTitle ?? session.processName,
+    summary: summarized
+      ? session.summary
+      : "Not summarized yet — this runs between captures.",
+    important: meaningful(session.importantSignals),
+    reminder: meaningful(session.reminderCandidate),
+    source: session.processName,
+    span: `${formatClock(started)} – ${formatClock(ended)}`,
+    meta: `${duration} · ${captures} capture${captures === 1 ? "" : "s"}`,
+  };
+}
+
 /** Ports ManualScanItemViewModel derived text for a ManualScanRecord. */
 export function scanView(scan) {
-  const label = scan.label ?? "Gemma summary failed";
-  const summary = scan.summary ?? scan.error ?? "No summary was produced.";
-  const important = (scan.importantSignals ?? "").trim();
-  const reminder = (scan.reminderCandidate ?? "").trim();
+  // Captures no longer carry their own summary: the label is derived from
+  // the window and the summary belongs to the session.
+  const label = scan.label ?? scan.windowTitle ?? scan.processName;
+  const grouped = Boolean(scan.sessionId);
+  const summary =
+    scan.summary ??
+    scan.error ??
+    (grouped
+      ? "Part of a session — its summary is on the session above."
+      : "Stored. It joins a session once this stretch of work ends.");
+  const important = meaningful(scan.importantSignals);
+  const reminder = meaningful(scan.reminderCandidate);
   const source = (scan.windowTitle ?? "").trim()
     ? `${scan.processName} | ${scan.windowTitle}`
     : scan.processName;
   const lang = (scan.ocrLanguage ?? "").trim() || "default";
+  const inference = Math.round(scan.inferenceMilliseconds ?? 0);
   const metrics =
     `UIA ${scan.uiAutomationCharacters} chars | OCR ${scan.ocrCharacters} chars (${lang}) | ` +
     `${scan.redactions} redactions | capture ${Math.round(scan.captureMilliseconds)} ms | ` +
-    `OCR ${Math.round(scan.ocrMilliseconds)} ms | Gemma ${Math.round(scan.inferenceMilliseconds)} ms`;
-  const status =
-    scan.status === 0
-      ? `Summarized locally with ${scan.modelId}`
-      : `OCR saved; ${scan.modelId} failed`;
+    `OCR ${Math.round(scan.ocrMilliseconds)} ms` +
+    (inference > 0 ? ` | Gemma ${inference} ms` : "");
+  const status = scan.error
+    ? `Capture stored; ${scan.error}`
+    : grouped
+      ? "Stored and grouped into a session"
+      : "Stored locally";
   const contextChars =
     scan.gemmaContextCharacters > 0
       ? Number(scan.gemmaContextCharacters).toLocaleString("en-US")
