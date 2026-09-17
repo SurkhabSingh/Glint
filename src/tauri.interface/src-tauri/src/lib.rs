@@ -9,6 +9,7 @@
 //! through the `Glint.Phase0.Cli` sidecar (see `bridge.rs` / `glint.rs`).
 
 mod bridge;
+mod cadence;
 mod glass;
 mod glint;
 mod runtime;

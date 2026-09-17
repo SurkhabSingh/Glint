@@ -570,37 +570,88 @@ async fn run_manual_scan(
 }
 
 async fn scan_loop(app: AppHandle, generation: u64) {
+    use crate::cadence::{self, CaptureDecision};
+    use std::time::Instant;
+
+    // Capture is signal-driven rather than a fixed tick (see cadence.rs):
+    // react to window switches, keep up while typing, tick slowly while
+    // reading, and stop while the user is away.
+    let mut last_scan: Option<Instant> = None;
+    let mut last_foreground = cadence::foreground_handle();
+    let mut foreground_changed_at: Option<Instant> = None;
+    let mut away = false;
+
     loop {
         if !is_current(&app, generation) {
             break;
         }
-        // Live tick announcement first: the frontend logs that a scan
-        // started immediately instead of waiting out capture + inference.
-        // Deliberately no window lookup here — the only window reads are
-        // the ones inside the user-initiated scan below; process/title
-        // fill in when its outcome arrives.
-        let tick_id = TICK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        let started_at_ms = chrono::Utc::now().timestamp_millis();
-        let _ = app.emit(
-            "scan-tick-started",
-            serde_json::json!({
-                "tickId": tick_id,
-                "startedAtMs": started_at_ms,
-            }),
-        );
-        match run_manual_scan(&app, generation).await {
-            None => break, // paused or superseded
-            Some(outcome) => {
-                let payload = outcome_payload(&outcome, Some(tick_id));
-                let _ = app.emit("scan-outcome", &payload);
-            }
+
+        let foreground = cadence::foreground_handle();
+        if foreground != last_foreground {
+            last_foreground = foreground;
+            foreground_changed_at = Some(Instant::now());
         }
-        // 1 s cadence between scans (ports ScanInterval), abortable by pause.
+
+        let decision = cadence::decide(cadence::CaptureSignals {
+            idle_ms: cadence::input_idle_ms(),
+            since_last_scan_ms: last_scan.map(|at| at.elapsed().as_millis() as u64),
+            since_foreground_change_ms: foreground_changed_at
+                .map(|at| at.elapsed().as_millis() as u64),
+            on_battery: cadence::on_battery(),
+        });
+
+        let wait_ms = match decision {
+            CaptureDecision::Idle => {
+                if !away {
+                    away = true;
+                    crate::timeline::record_lifecycle(&app, "user.away");
+                }
+                cadence::POLL_INTERVAL_MS
+            }
+            CaptureDecision::Wait(ms) => ms,
+            CaptureDecision::Capture(reason) => {
+                if away {
+                    away = false;
+                    crate::timeline::record_lifecycle(&app, "user.returned");
+                }
+                foreground_changed_at = None;
+
+                // Live tick announcement first: the frontend logs that a scan
+                // started immediately instead of waiting out capture +
+                // inference. Deliberately no window lookup here — the only
+                // window reads are the ones inside the scan below;
+                // process/title fill in when its outcome arrives.
+                let tick_id = TICK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let started_at_ms = chrono::Utc::now().timestamp_millis();
+                let _ = app.emit(
+                    "scan-tick-started",
+                    serde_json::json!({
+                        "tickId": tick_id,
+                        "startedAtMs": started_at_ms,
+                        "reason": reason.as_str(),
+                    }),
+                );
+                match run_manual_scan(&app, generation).await {
+                    None => break, // paused or superseded
+                    Some(outcome) => {
+                        let payload = outcome_payload(&outcome, Some(tick_id));
+                        let _ = app.emit("scan-outcome", &payload);
+                    }
+                }
+
+                // Time the next interval from the end of this scan, so a slow
+                // scan does not immediately qualify for the next one.
+                last_scan = Some(Instant::now());
+                continue;
+            }
+        };
+
+        // Abortable wait, so a pause is noticed within one poll interval.
         {
             let runtime: State<ScanRuntime> = app.state::<ScanRuntime>();
             let mut rx = runtime.cancel.subscribe();
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(wait_ms)) => {}
                 _ = rx.changed() => {
                     if !is_current(&app, generation) {
                         break;
