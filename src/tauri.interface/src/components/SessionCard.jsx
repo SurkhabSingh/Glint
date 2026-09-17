@@ -30,6 +30,12 @@ function SessionCard({ session, onSetOutcome }) {
         )}
       </div>
       <div className="session-summary">{view.summary}</div>
+      {view.supersededNote && (
+        <div className="session-note">{view.supersededNote}</div>
+      )}
+      {view.stale && (
+        <div className="session-stale">Untouched for over a week</div>
+      )}
       {view.important && <div className="scan-important">{view.important}</div>}
       {view.reminder && <div className="scan-reminder">{view.reminder}</div>}
       <div className="session-foot">

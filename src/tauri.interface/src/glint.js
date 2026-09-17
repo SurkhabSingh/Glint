@@ -85,7 +85,10 @@ function meaningful(text) {
 
 // Enums cross the bridge as their numeric value, like scan.status does, so
 // these must stay in the order the C# enums declare.
-const OUTCOMES = ["unknown", "open", "settled"];
+const OUTCOMES = ["unknown", "open", "settled", "superseded"];
+
+/** A session's outcome as a name rather than an enum ordinal. */
+export const outcomeOf = (session) => OUTCOMES[session.outcome ?? 0] ?? "unknown";
 const OUTCOME_SOURCES = ["none", "rule", "recurrence", "user"];
 
 /** Derived display text for one activity session. */
@@ -104,7 +107,19 @@ export function sessionView(session) {
     minor,
     outcome,
     outcomeSource,
-    outcomeLabel: outcome === "open" ? "Unfinished" : "Done",
+    outcomeLabel:
+      outcome === "open"
+        ? "Unfinished"
+        : outcome === "superseded"
+          ? "Superseded"
+          : "Done",
+    // An outstanding thing nobody has touched in a week is worth flagging,
+    // but it is still only outstanding — not abandoned, and not done.
+    stale: outcome === "open" && Date.now() - started > 7 * 86400000,
+    supersededNote:
+      outcome === "superseded"
+        ? "A later session carried this forward."
+        : "",
     // Only say where a verdict came from when the user set it, so their own
     // decision is visibly theirs rather than something Glint guessed.
     outcomeNote: outcomeSource === "user" ? "You marked this" : "",

@@ -245,7 +245,7 @@ public interface ICaptureEventStore
             SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
                    scan_ids_json, label, summary, status, important_signals,
                    reminder_candidate, head_text, tail_text, is_minor,
-                   outcome, outcome_source, outcome_at_ms
+                   outcome, outcome_source, outcome_at_ms, thread_id
             FROM activity_sessions
             WHERE status = 'Active'
             ORDER BY started_at_ms DESC, id DESC
@@ -267,12 +267,12 @@ public interface ICaptureEventStore
                 (id, started_at_ms, ended_at_ms, process_name, window_title,
                  scan_ids_json, label, summary, status, important_signals,
                  reminder_candidate, head_text, tail_text, is_minor,
-                 outcome, outcome_source, outcome_at_ms)
+                 outcome, outcome_source, outcome_at_ms, thread_id)
             VALUES
                 ($id, $startedAt, $endedAt, $process, $title,
                  $scanIds, $label, $summary, $status, $importantSignals,
                  $reminderCandidate, $headText, $tailText, $isMinor,
-                 $outcome, $outcomeSource, $outcomeAt)
+                 $outcome, $outcomeSource, $outcomeAt, $threadId)
             ON CONFLICT(id) DO UPDATE SET
                 ended_at_ms = excluded.ended_at_ms,
                 scan_ids_json = excluded.scan_ids_json,
@@ -286,7 +286,8 @@ public interface ICaptureEventStore
                 is_minor = excluded.is_minor,
                 outcome = excluded.outcome,
                 outcome_source = excluded.outcome_source,
-                outcome_at_ms = excluded.outcome_at_ms;
+                outcome_at_ms = excluded.outcome_at_ms,
+                thread_id = excluded.thread_id;
             """;
         command.Parameters.AddWithValue("$id", session.Id);
         command.Parameters.AddWithValue("$startedAt", session.StartedAtMilliseconds);
@@ -312,6 +313,8 @@ public interface ICaptureEventStore
             "$outcomeSource", session.OutcomeSource.ToString());
         command.Parameters.AddWithValue(
             "$outcomeAt", (object?)session.OutcomeAtMilliseconds ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "$threadId", (object?)session.ThreadId ?? DBNull.Value);
         command.ExecuteNonQuery();
     }
 
@@ -328,7 +331,7 @@ public interface ICaptureEventStore
             SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
                    scan_ids_json, label, summary, status, important_signals,
                    reminder_candidate, head_text, tail_text, is_minor,
-                   outcome, outcome_source, outcome_at_ms
+                   outcome, outcome_source, outcome_at_ms, thread_id
             FROM activity_sessions
             ORDER BY started_at_ms DESC, id DESC
             LIMIT $limit;
@@ -368,7 +371,8 @@ public interface ICaptureEventStore
                 reader.IsDBNull(15) ? null : reader.GetString(15), out var outcomeSource)
                 ? outcomeSource
                 : SessionOutcomeSource.None,
-            reader.IsDBNull(16) ? null : reader.GetInt64(16));
+            reader.IsDBNull(16) ? null : reader.GetInt64(16),
+            reader.IsDBNull(17) ? null : reader.GetString(17));
 
     /// <summary>
     /// Records that the user went away or came back, or that recording
@@ -563,10 +567,75 @@ public interface ICaptureEventStore
             SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
                    scan_ids_json, label, summary, status, important_signals,
                    reminder_candidate, head_text, tail_text, is_minor,
-                   outcome, outcome_source, outcome_at_ms
+                   outcome, outcome_source, outcome_at_ms, thread_id
             FROM activity_sessions
             WHERE outcome_source = 'None' AND summary IS NOT NULL
+            -- Oldest first, so a sweep builds thread chains in the order the
+            -- work actually happened and later mentions supersede earlier.
+            ORDER BY started_at_ms ASC
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$limit", limit);
+        using var reader = command.ExecuteReader();
+        var sessions = new List<ActivitySession>();
+        while (reader.Read())
+        {
+            sessions.Add(ReadSession(reader));
+        }
+
+        return sessions;
+    }
+
+    /// <summary>
+    /// Recent sessions that left something outstanding, newest first. These
+    /// are the only candidates a new open session can join: a thread is a
+    /// chain of outstanding things, so a settled or superseded session is
+    /// not part of one.
+    /// </summary>
+    public IReadOnlyList<ActivitySession> GetRecentOpenSessions(
+        long sinceMilliseconds,
+        int limit = 200)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
+                   scan_ids_json, label, summary, status, important_signals,
+                   reminder_candidate, head_text, tail_text, is_minor,
+                   outcome, outcome_source, outcome_at_ms, thread_id
+            FROM activity_sessions
+            WHERE outcome = 'Open' AND started_at_ms >= $since
             ORDER BY started_at_ms DESC
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$since", sinceMilliseconds);
+        command.Parameters.AddWithValue("$limit", limit);
+        using var reader = command.ExecuteReader();
+        var sessions = new List<ActivitySession>();
+        while (reader.Read())
+        {
+            sessions.Add(ReadSession(reader));
+        }
+
+        return sessions;
+    }
+
+    /// <summary>
+    /// Outstanding sessions not yet placed in a thread, oldest first, so a
+    /// sweep links them in the order the work happened.
+    /// </summary>
+    public IReadOnlyList<ActivitySession> GetOpenSessionsWithoutThread(int limit = 200)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
+                   scan_ids_json, label, summary, status, important_signals,
+                   reminder_candidate, head_text, tail_text, is_minor,
+                   outcome, outcome_source, outcome_at_ms, thread_id
+            FROM activity_sessions
+            WHERE outcome = 'Open' AND thread_id IS NULL
+            ORDER BY started_at_ms ASC
             LIMIT $limit;
             """;
         command.Parameters.AddWithValue("$limit", limit);
@@ -595,7 +664,7 @@ public interface ICaptureEventStore
             SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
                    scan_ids_json, label, summary, status, important_signals,
                    reminder_candidate, head_text, tail_text, is_minor,
-                   outcome, outcome_source, outcome_at_ms
+                   outcome, outcome_source, outcome_at_ms, thread_id
             FROM activity_sessions
             WHERE summary IS NULL AND status = 'Closed' AND is_minor = 0
             ORDER BY started_at_ms ASC
@@ -1028,7 +1097,8 @@ public interface ICaptureEventStore
                 is_minor INTEGER NOT NULL DEFAULT 0,
                 outcome TEXT NOT NULL DEFAULT 'Unknown',
                 outcome_source TEXT NOT NULL DEFAULT 'None',
-                outcome_at_ms INTEGER
+                outcome_at_ms INTEGER,
+                thread_id TEXT
             ) STRICT;
 
             CREATE INDEX IF NOT EXISTS idx_activity_sessions_started_at
@@ -1047,6 +1117,7 @@ public interface ICaptureEventStore
         EnsureActivitySessionColumn("outcome");
         EnsureActivitySessionColumn("outcome_source");
         EnsureActivitySessionColumn("outcome_at_ms");
+        EnsureActivitySessionColumn("thread_id");
         Execute(
             """
             INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
@@ -1093,6 +1164,8 @@ public interface ICaptureEventStore
                 "ALTER TABLE activity_sessions ADD COLUMN outcome_source TEXT NOT NULL DEFAULT 'None';",
             "outcome_at_ms" =>
                 "ALTER TABLE activity_sessions ADD COLUMN outcome_at_ms INTEGER;",
+            "thread_id" =>
+                "ALTER TABLE activity_sessions ADD COLUMN thread_id TEXT;",
             _ => throw new ArgumentOutOfRangeException(
                 nameof(columnName),
                 columnName,

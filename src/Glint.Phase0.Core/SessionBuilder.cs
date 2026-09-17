@@ -14,6 +14,12 @@ public interface ISessionWorkStore : ISessionStore
     IReadOnlyList<ActivityMarker> GetMarkers(long fromMilliseconds, long toMilliseconds);
 
     IReadOnlyList<ActivitySession> GetSessionsWithoutOutcome(int limit = 200);
+
+    IReadOnlyList<ActivitySession> GetRecentOpenSessions(
+        long sinceMilliseconds,
+        int limit = 200);
+
+    IReadOnlyList<ActivitySession> GetOpenSessionsWithoutThread(int limit = 200);
 }
 
 public sealed record SessionBuildResult(
@@ -21,7 +27,8 @@ public sealed record SessionBuildResult(
     int Summarized,
     int Failed,
     int Minor,
-    int Decided);
+    int Decided,
+    int Threaded);
 
 /// <summary>
 /// Turns ungrouped captures into summarized sessions: group by time, seal in
@@ -138,13 +145,13 @@ public sealed class SessionBuilder
                 // Whether anything was left outstanding, read from the summary
                 // just produced. No extra model call.
                 var (outcome, source) = OutcomeRules.Evaluate(withSummary);
-                _store.UpsertSession(withSummary with
+                _store.UpsertSession(AssignThread(withSummary with
                 {
                     Outcome = outcome,
                     OutcomeSource = source,
                     OutcomeAtMilliseconds =
                         source == SessionOutcomeSource.None ? null : nowMilliseconds
-                });
+                }));
                 summarized++;
             }
             catch (OperationCanceledException)
@@ -164,16 +171,75 @@ public sealed class SessionBuilder
         foreach (var session in _store.GetSessionsWithoutOutcome())
         {
             var (outcome, source) = OutcomeRules.Evaluate(session);
-            _store.UpsertSession(session with
+            _store.UpsertSession(AssignThread(session with
             {
                 Outcome = outcome,
                 OutcomeSource = source,
                 OutcomeAtMilliseconds = nowMilliseconds
-            });
+            }));
             decided++;
         }
 
-        return new(sealedCount, summarized, failed, minor, decided);
+        // Outstanding sessions judged before threads existed. Each pass
+        // queries the store fresh, so a session superseded earlier in this
+        // loop is no longer a candidate by the time the next one looks.
+        var threaded = 0;
+        foreach (var session in _store.GetOpenSessionsWithoutThread())
+        {
+            var assigned = AssignThread(session);
+            if (assigned.ThreadId is not null)
+            {
+                _store.UpsertSession(assigned);
+                threaded++;
+            }
+        }
+
+        return new(sealedCount, summarized, failed, minor, decided, threaded);
+    }
+
+    /// <summary>
+    /// Puts a session that left something outstanding into a thread with the
+    /// earlier mentions of the same thing, and marks the one it replaces as
+    /// superseded so the same commitment is not listed twice.
+    /// </summary>
+    private ActivitySession AssignThread(ActivitySession session)
+    {
+        if (session.Outcome != SessionOutcome.Open)
+        {
+            return session;
+        }
+
+        var since = session.StartedAtMilliseconds
+            - SessionThreads.NearIdenticalWindowMilliseconds;
+        var earlier = SessionThreads.FindThread(
+            session,
+            _store.GetRecentOpenSessions(since));
+        if (earlier is null)
+        {
+            return session with { ThreadId = Guid.NewGuid().ToString("N") };
+        }
+
+        var threadId = earlier.ThreadId ?? Guid.NewGuid().ToString("N");
+
+        if (earlier.OutcomeSource != SessionOutcomeSource.User)
+        {
+            _store.UpsertSession(earlier with
+            {
+                Outcome = SessionOutcome.Superseded,
+                OutcomeSource = SessionOutcomeSource.Recurrence,
+                OutcomeAtMilliseconds = session.StartedAtMilliseconds,
+                ThreadId = threadId
+            });
+        }
+        else if (earlier.ThreadId is null)
+        {
+            // A verdict the user gave stands, but belonging to a thread is
+            // not a verdict: record the membership without touching what
+            // they decided.
+            _store.UpsertSession(earlier with { ThreadId = threadId });
+        }
+
+        return session with { ThreadId = threadId };
     }
 
     /// <summary>

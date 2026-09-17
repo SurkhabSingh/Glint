@@ -1,6 +1,7 @@
 import StatusBanner from "../components/StatusBanner";
 import ScanCard, { PendingScanCard } from "../components/ScanCard";
 import SessionCard from "../components/SessionCard";
+import { outcomeOf } from "../glint";
 
 /** Ports the WinUI Activity page: header, InfoBar, Capture card, history. */
 function ActivityPage({
@@ -23,6 +24,10 @@ function ActivityPage({
   setupLog,
   onSetupRuntime,
 }) {
+  const visible = (sessions ?? []).filter((session) => !session.isMinor);
+  const unfinished = visible.filter((session) => outcomeOf(session) === "open");
+  // Everything else, so nothing appears twice on the page.
+  const rest = visible.filter((session) => outcomeOf(session) !== "open");
   const minorSessions = (sessions ?? []).filter((session) => session.isMinor);
   return (
     <div className="glint-page">
@@ -85,6 +90,25 @@ function ActivityPage({
           <p>{captureSummary}</p>
         </div>
 
+        {unfinished.length > 0 && (
+          <>
+            <h2 className="glint-section-title">Unfinished</h2>
+            <p className="glint-section-sub">
+              Sessions that left something outstanding. When the same thing
+              comes up again, only the latest mention is listed here.
+            </p>
+            <div className="scan-list">
+              {unfinished.map((session) => (
+                <SessionCard
+                  key={session.id}
+                  session={session}
+                  onSetOutcome={onSetSessionOutcome}
+                />
+              ))}
+            </div>
+          </>
+        )}
+
         <h2 className="glint-section-title">Sessions</h2>
         <p className="glint-section-sub">
           {(sessions ?? []).length > 0
@@ -94,15 +118,13 @@ function ActivityPage({
               : "Start scanning to build your first session."}
         </p>
         <div className="scan-list">
-          {(sessions ?? [])
-            .filter((session) => !session.isMinor)
-            .map((session) => (
-              <SessionCard
-                key={session.id}
-                session={session}
-                onSetOutcome={onSetSessionOutcome}
-              />
-            ))}
+          {rest.map((session) => (
+            <SessionCard
+              key={session.id}
+              session={session}
+              onSetOutcome={onSetSessionOutcome}
+            />
+          ))}
         </div>
         {minorSessions.length > 0 && (
           <details className="minor-sessions">

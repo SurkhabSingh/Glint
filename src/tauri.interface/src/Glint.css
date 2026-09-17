@@ -1415,3 +1415,20 @@
   background: rgba(255, 255, 255, 0.12);
   color: #fff;
 }
+
+.session-state.superseded {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.session-card .session-stale {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+.session-card .session-note {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12px;
+  margin-top: 6px;
+}

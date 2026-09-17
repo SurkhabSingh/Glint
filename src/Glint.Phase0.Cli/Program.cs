@@ -371,6 +371,7 @@ try
                     built.Failed,
                     built.Minor,
                     built.Decided,
+                    built.Threaded,
                     workerStarts = LiteRtWorkerMetrics.StartCount - startsBefore
                 },
                 json);

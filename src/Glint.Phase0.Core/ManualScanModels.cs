@@ -102,7 +102,12 @@ public enum SessionOutcome
     Open,
 
     /// Nothing outstanding.
-    Settled
+    Settled,
+
+    /// A later session in the same thread replaced this one. Deliberately
+    /// not Settled: the work was not finished, it moved on. Saying "done"
+    /// here would be a claim nothing supports.
+    Superseded
 }
 
 /// Where a session's outcome came from, so a weaker source can never
@@ -140,7 +145,10 @@ public sealed record ActivitySession(
     bool IsMinor = false,
     SessionOutcome Outcome = SessionOutcome.Unknown,
     SessionOutcomeSource OutcomeSource = SessionOutcomeSource.None,
-    long? OutcomeAtMilliseconds = null);
+    long? OutcomeAtMilliseconds = null,
+    // Sessions carrying the same outstanding thing. Null when nothing was
+    // left outstanding, or when nothing matched confidently.
+    string? ThreadId = null);
 
 public interface ISessionStore
 {

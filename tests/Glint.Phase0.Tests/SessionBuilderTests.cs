@@ -149,6 +149,83 @@ public sealed class SessionBuilderTests
             .RunAsync(Start + Sessionizer.QuietTailMilliseconds)).Decided);
     }
 
+    private static ActivitySession Outstanding(
+        string id,
+        long at,
+        string process,
+        string reminder,
+        SessionOutcome outcome = SessionOutcome.Unknown,
+        SessionOutcomeSource source = SessionOutcomeSource.None) =>
+        new(
+            id, at, at + 60_000, process, "Chat", [$"scan-{id}"],
+            "Chatting", "The user chatted.", ActivitySessionStatus.Closed,
+            null, reminder, Outcome: outcome, OutcomeSource: source);
+
+    [Fact]
+    public async Task TheSameCommitmentMentionedTwiceIsListedOnce()
+    {
+        // The real pair: two Discord sittings the same day about one meeting.
+        var store = new FakeSessionStore();
+        store.UpsertSession(Outstanding(
+            "a", Start, "Discord", "Job meeting tomorrow at 9 pm with unemployed job meeting"));
+        store.UpsertSession(Outstanding(
+            "b", Start + (14 * 3_600_000), "Discord",
+            "Jobless meeting tomorrow at 10 pm with kiyopon"));
+
+        await new SessionBuilder(store, new CountingSummarizer())
+            .RunAsync(Start + (20 * 3_600_000));
+
+        // The later mention stands; the earlier one is replaced, not "done".
+        Assert.Equal(SessionOutcome.Open, store.Sessions["b"].Outcome);
+        Assert.Equal(SessionOutcome.Superseded, store.Sessions["a"].Outcome);
+        Assert.Equal(SessionOutcomeSource.Recurrence, store.Sessions["a"].OutcomeSource);
+        Assert.NotEqual(SessionOutcome.Settled, store.Sessions["a"].Outcome);
+
+        // Both sides of one thread.
+        Assert.NotNull(store.Sessions["a"].ThreadId);
+        Assert.Equal(store.Sessions["a"].ThreadId, store.Sessions["b"].ThreadId);
+    }
+
+    [Fact]
+    public async Task UnrelatedCommitmentsAreNotFoldedTogether()
+    {
+        var store = new FakeSessionStore();
+        store.UpsertSession(Outstanding(
+            "a", Start, "Discord", "Send logs tonight before our meeting at 10pm tomorrow"));
+        store.UpsertSession(Outstanding(
+            "b", Start + 3_600_000, "Discord",
+            "Jobless meeting tomorrow at 10 pm with kiyopon"));
+
+        await new SessionBuilder(store, new CountingSummarizer())
+            .RunAsync(Start + (5 * 3_600_000));
+
+        // Both still outstanding, in threads of their own.
+        Assert.Equal(SessionOutcome.Open, store.Sessions["a"].Outcome);
+        Assert.Equal(SessionOutcome.Open, store.Sessions["b"].Outcome);
+        Assert.NotEqual(store.Sessions["a"].ThreadId, store.Sessions["b"].ThreadId);
+    }
+
+    [Fact]
+    public async Task AVerdictTheUserGaveIsNotRewrittenBySupersession()
+    {
+        var store = new FakeSessionStore();
+        store.UpsertSession(Outstanding(
+            "a", Start, "Discord", "Job meeting tomorrow at 9 pm with unemployed job meeting",
+            SessionOutcome.Open, SessionOutcomeSource.User));
+        store.UpsertSession(Outstanding(
+            "b", Start + (14 * 3_600_000), "Discord",
+            "Jobless meeting tomorrow at 10 pm with kiyopon"));
+
+        await new SessionBuilder(store, new CountingSummarizer())
+            .RunAsync(Start + (20 * 3_600_000));
+
+        // Still theirs, and still open.
+        Assert.Equal(SessionOutcome.Open, store.Sessions["a"].Outcome);
+        Assert.Equal(SessionOutcomeSource.User, store.Sessions["a"].OutcomeSource);
+        // They share the thread even so.
+        Assert.Equal(store.Sessions["a"].ThreadId, store.Sessions["b"].ThreadId);
+    }
+
     private sealed class CountingSummarizer : IActivitySummarizer
     {
         public int Calls { get; private set; }
@@ -228,6 +305,24 @@ public sealed class SessionBuilderTests
             Sessions.Values
                 .Where(session => session.OutcomeSource == SessionOutcomeSource.None
                     && session.Summary is not null)
+                .Take(limit)
+                .ToList();
+
+        public IReadOnlyList<ActivitySession> GetRecentOpenSessions(
+            long sinceMilliseconds,
+            int limit = 200) =>
+            Sessions.Values
+                .Where(session => session.Outcome == SessionOutcome.Open
+                    && session.StartedAtMilliseconds >= sinceMilliseconds)
+                .OrderByDescending(session => session.StartedAtMilliseconds)
+                .Take(limit)
+                .ToList();
+
+        public IReadOnlyList<ActivitySession> GetOpenSessionsWithoutThread(int limit = 200) =>
+            Sessions.Values
+                .Where(session => session.Outcome == SessionOutcome.Open
+                    && session.ThreadId is null)
+                .OrderBy(session => session.StartedAtMilliseconds)
                 .Take(limit)
                 .ToList();
 
