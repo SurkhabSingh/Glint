@@ -609,7 +609,7 @@ async fn scan_loop(app: AppHandle, generation: u64) {
 // ---------------------------------------------------------------------------
 
 /// Full dashboard bootstrap (ports InitializeAsync + LoadScanHistory).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn glint_initialize(app: AppHandle) -> Result<serde_json::Value, String> {
     let root = crate::bridge::data_root()?;
     let db_args = crate::bridge::db_args(&app, &root);
@@ -703,7 +703,7 @@ pub fn glint_initialize(app: AppHandle) -> Result<serde_json::Value, String> {
 }
 
 /// Foreground privacy probe (ports ProbeAsync).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn glint_probe(app: AppHandle) -> Result<serde_json::Value, String> {
     match crate::bridge::run_sidecar(&app, &["probe"]) {
         Ok(out) => {
@@ -727,7 +727,7 @@ pub fn glint_probe(app: AppHandle) -> Result<serde_json::Value, String> {
 }
 
 /// Encrypted storage verification (ports CheckStorageAsync).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn glint_verify_storage(app: AppHandle) -> Result<serde_json::Value, String> {
     let root = crate::bridge::data_root()?;
     let db_args = crate::bridge::db_args(&app, &root);
@@ -758,7 +758,7 @@ pub fn glint_verify_storage(app: AppHandle) -> Result<serde_json::Value, String>
 }
 
 /// Machine compatibility check (ports CheckCompatibilityAsync).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn glint_check_compatibility(app: AppHandle) -> Result<serde_json::Value, String> {
     match crate::bridge::run_sidecar(&app, &["compatibility"]) {
         Ok(out) => {
@@ -786,7 +786,7 @@ pub fn glint_check_compatibility(app: AppHandle) -> Result<serde_json::Value, St
 }
 
 /// Borderless-capture consent (ports RequestBorderlessAsync).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn glint_request_borderless(app: AppHandle) -> Result<serde_json::Value, String> {
     match crate::bridge::run_sidecar(&app, &["request-borderless"]) {
         Ok(out) => {
@@ -815,7 +815,7 @@ pub fn glint_request_borderless(app: AppHandle) -> Result<serde_json::Value, Str
 }
 
 /// Rich local-context search (ports SearchContextAsync via search-context).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn glint_search(app: AppHandle, query: String) -> Result<serde_json::Value, String> {
     let trimmed = query.trim().to_string();
     if trimmed.is_empty() {
@@ -849,7 +849,7 @@ pub fn glint_search(app: AppHandle, query: String) -> Result<serde_json::Value, 
 }
 
 /// Recent scan history (ports LoadScanHistory).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn glint_history(app: AppHandle, limit: Option<u32>) -> Result<serde_json::Value, String> {
     let root = crate::bridge::data_root()?;
     let db_args = crate::bridge::db_args(&app, &root);
@@ -868,7 +868,7 @@ pub fn glint_history(app: AppHandle, limit: Option<u32>) -> Result<serde_json::V
 
 /// Gemma model import (ports ImportGemmaModelAsync; writes the
 /// `models/active.json` pointer the runtime locator reads).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn glint_import_model(app: AppHandle, model_path: String) -> Result<serde_json::Value, String> {
     let fail = |summary: String| {
         serde_json::json!({
@@ -952,7 +952,7 @@ pub fn glint_import_model(app: AppHandle, model_path: String) -> Result<serde_js
 }
 
 /// LiteRT runtime state with auto-wiring (fast, no network).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn glint_ensure_runtime(app: AppHandle) -> Result<serde_json::Value, String> {
     Ok(crate::runtime::ensure_runtime(&app))
 }
@@ -980,7 +980,7 @@ pub async fn glint_setup_runtime(app: AppHandle) -> Result<serde_json::Value, St
 }
 
 /// Start continuous scanning (ports StartScanningAsync; owns the 1 s loop).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn glint_start_scanning(app: AppHandle) -> Result<serde_json::Value, String> {
     {
         let runtime: State<ScanRuntime> = app.state();
@@ -1100,7 +1100,8 @@ pub fn glint_scan_state(app: AppHandle) -> Result<serde_json::Value, String> {
 /// Single capture of the current window (ports CaptureCurrentWindowAsync).
 #[tauri::command]
 pub async fn glint_capture_once(app: AppHandle) -> Result<serde_json::Value, String> {
-    let ready = crate::bridge::run_sidecar(&app, &["runtime-status"])
+    let ready = crate::bridge::run_sidecar_async(&app, &["runtime-status"])
+        .await
         .ok()
         .map(|out| runtime_port(&out.json).1)
         .unwrap_or(false);
@@ -1178,7 +1179,8 @@ pub async fn glint_ask(
     }
 
     // 1. Resolve the LiteRT runtime (paths for model-generate).
-    let resolution = crate::bridge::run_sidecar(&app, &["runtime-status"])
+    let resolution = crate::bridge::run_sidecar_async(&app, &["runtime-status"])
+        .await
         .map_err(|e| format!("Gemma runtime check failed: {e}"))?
         .json;
     let (ready_summary, ready) = runtime_port(&resolution);
@@ -1206,7 +1208,8 @@ pub async fn glint_ask(
     let db_args = crate::bridge::db_args(&app, &root);
     let mut args = vec!["manual-history", "--limit", "500"];
     args.extend(db_args.iter().map(|s| s.as_str()));
-    let scans = crate::bridge::run_sidecar(&app, &args)
+    let scans = crate::bridge::run_sidecar_async(&app, &args)
+        .await
         .map(|out| {
             out.json
                 .get("scans")
@@ -1483,7 +1486,7 @@ pub fn glint_shortcut_status(app: AppHandle) -> Result<serde_json::Value, String
 
 /// Timeline fast-lane read: sealed day file for `date` (YYYY-MM-DD,
 /// default today) → hook-exact + heartbeat rows, oldest first.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn glint_timeline(app: AppHandle, date: Option<String>) -> Result<serde_json::Value, String> {
     let day = date
         .filter(|d| !d.trim().is_empty())

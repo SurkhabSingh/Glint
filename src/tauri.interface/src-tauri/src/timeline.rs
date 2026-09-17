@@ -608,18 +608,20 @@ pub fn start_hook(app: AppHandle) {
         .spawn(hook_thread)
         .expect("foreground hook thread");
     let pump = app.clone();
-    tauri::async_runtime::spawn(async move {
-        while let Ok(hwnd) = rx.recv() {
-            if !crate::glint::scanning_now(&pump) {
-                continue;
+    // A dedicated thread, not an async task: rx.recv() blocks, so on the async
+    // runtime it parked a worker thread for the life of the process. The loop
+    // is serial anyway, which keeps rapid switches in timestamp order.
+    std::thread::Builder::new()
+        .name("glint-timeline-pump".to_string())
+        .spawn(move || {
+            while let Ok(hwnd) = rx.recv() {
+                if !crate::glint::scanning_now(&pump) {
+                    continue;
+                }
+                handle_switch(&pump, hwnd);
             }
-            let app = pump.clone();
-            // Serialize handling so rapid switches keep timestamp order.
-            tauri::async_runtime::spawn_blocking(move || handle_switch(&app, hwnd))
-                .await
-                .ok();
-        }
-    });
+        })
+        .expect("timeline pump thread");
 }
 
 #[cfg(test)]

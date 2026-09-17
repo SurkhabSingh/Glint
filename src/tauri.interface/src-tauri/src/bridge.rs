@@ -186,6 +186,19 @@ pub fn run_sidecar(
     }
 }
 
+/// `run_sidecar` waits on a child process, so async callers must hand it to
+/// a blocking thread instead of stalling an async runtime worker.
+pub async fn run_sidecar_async(app: &AppHandle, args: &[&str]) -> Result<SidecarOutput, String> {
+    let app = app.clone();
+    let owned: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        let refs: Vec<&str> = owned.iter().map(|arg| arg.as_str()).collect();
+        run_sidecar(&app, &refs)
+    })
+    .await
+    .map_err(|error| format!("Sidecar task failed: {error}"))?
+}
+
 /// Base args shared by every verb that opens the database.
 pub fn db_args(app: &AppHandle, root: &std::path::Path) -> Vec<String> {
     let mut args = vec![
