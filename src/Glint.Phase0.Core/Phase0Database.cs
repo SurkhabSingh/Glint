@@ -11,7 +11,7 @@ public interface ICaptureEventStore
     void Insert(RawCaptureEvent captureEvent);
 }
 
-    public sealed class Phase0Database : ICaptureEventStore, IManualScanStore, ISessionStore, IDisposable
+    public sealed class Phase0Database : ICaptureEventStore, IManualScanStore, ISessionWorkStore, IDisposable
 {
     private static readonly Lock InitializationLock = new();
     private static bool _sqliteInitialized;
@@ -254,9 +254,12 @@ public interface ICaptureEventStore
         return reader.Read() ? ReadSession(reader) : null;
     }
 
-    public void UpsertSession(ActivitySession session)
+    public void UpsertSession(ActivitySession session) => UpsertSession(session, null);
+
+    private void UpsertSession(ActivitySession session, SqliteTransaction? transaction)
     {
         using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText =
             """
             INSERT INTO activity_sessions
@@ -342,6 +345,148 @@ public interface ICaptureEventStore
             reader.IsDBNull(10) ? null : reader.GetString(10),
             reader.IsDBNull(11) ? string.Empty : reader.GetString(11),
             reader.IsDBNull(12) ? string.Empty : reader.GetString(12));
+
+    /// Captures not yet grouped into a session, oldest first: the batch the
+    /// sessionizer walks.
+    public IReadOnlyList<CaptureRow> GetUnassignedCaptures(int limit = 1_000)
+    {
+        if (limit is < 1 or > 5_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, captured_at_ms, process_name, window_title
+            FROM manual_scans
+            WHERE session_id IS NULL
+            ORDER BY captured_at_ms ASC, id ASC
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$limit", limit);
+        using var reader = command.ExecuteReader();
+        var captures = new List<CaptureRow>();
+        while (reader.Read())
+        {
+            captures.Add(new(
+                reader.GetString(0),
+                reader.GetInt64(1),
+                reader.GetString(2),
+                reader.GetString(3)));
+        }
+
+        return captures;
+    }
+
+    /// Redacted text for the given captures, oldest first. The text itself
+    /// lives once in the FTS table and is joined by content hash.
+    public IReadOnlyList<string> GetCaptureTexts(IReadOnlyList<string> scanIds)
+    {
+        ArgumentNullException.ThrowIfNull(scanIds);
+        if (scanIds.Count == 0)
+        {
+            return [];
+        }
+
+        using var command = _connection.CreateCommand();
+        var names = new List<string>(scanIds.Count);
+        for (var index = 0; index < scanIds.Count; index++)
+        {
+            var name = $"$id{index}";
+            names.Add(name);
+            command.Parameters.AddWithValue(name, scanIds[index]);
+        }
+
+        command.CommandText =
+            $"""
+            SELECT f.text
+            FROM manual_scans AS m
+            LEFT JOIN raw_events_fts AS f
+              ON f.content_hash = m.content_hash
+            WHERE m.id IN ({string.Join(", ", names)})
+            ORDER BY m.captured_at_ms ASC, m.id ASC;
+            """;
+        using var reader = command.ExecuteReader();
+        var texts = new List<string>();
+        while (reader.Read())
+        {
+            if (!reader.IsDBNull(0))
+            {
+                texts.Add(reader.GetString(0));
+            }
+        }
+
+        return texts;
+    }
+
+    /// Writes the session and stamps its captures in one transaction, so a
+    /// crash can never leave a session referencing captures that do not point
+    /// back at it. The previous design wrote the id into the session before
+    /// the capture existed.
+    public void SealSession(ActivitySession session, IReadOnlyList<string> scanIds)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(scanIds);
+
+        using var transaction = _connection.BeginTransaction();
+        UpsertSession(session, transaction);
+
+        if (scanIds.Count > 0)
+        {
+            using var update = _connection.CreateCommand();
+            update.Transaction = transaction;
+            var names = new List<string>(scanIds.Count);
+            for (var index = 0; index < scanIds.Count; index++)
+            {
+                var name = $"$id{index}";
+                names.Add(name);
+                update.Parameters.AddWithValue(name, scanIds[index]);
+            }
+
+            update.Parameters.AddWithValue("$session", session.Id);
+            update.CommandText =
+                $"""
+                UPDATE manual_scans
+                SET session_id = $session
+                WHERE id IN ({string.Join(", ", names)});
+                """;
+            update.ExecuteNonQuery();
+        }
+
+        transaction.Commit();
+    }
+
+    /// Sessions written but never summarized, oldest first: either the model
+    /// failed or the process died between sealing and summarizing.
+    public IReadOnlyList<ActivitySession> GetUnsummarizedSessions(int limit = 20)
+    {
+        if (limit is < 1 or > 200)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, started_at_ms, ended_at_ms, process_name, window_title,
+                   scan_ids_json, label, summary, status, important_signals,
+                   reminder_candidate, head_text, tail_text
+            FROM activity_sessions
+            WHERE summary IS NULL AND status = 'Closed'
+            ORDER BY started_at_ms ASC
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$limit", limit);
+        using var reader = command.ExecuteReader();
+        var sessions = new List<ActivitySession>();
+        while (reader.Read())
+        {
+            sessions.Add(ReadSession(reader));
+        }
+
+        return sessions;
+    }
 
     private const string ManualScanContentHashExistsSql =
         "SELECT EXISTS(SELECT 1 FROM manual_scans WHERE content_hash = $hash);";

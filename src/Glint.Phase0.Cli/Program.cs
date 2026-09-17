@@ -305,6 +305,51 @@ try
             break;
         }
 
+        // Groups ungrouped captures into sessions and summarizes them: one
+        // model call per session rather than one per capture. Safe to run
+        // repeatedly; sessions still in progress are left alone.
+        case "sessionize":
+        {
+            var resolution = LiteRtRuntimeLocator.Resolve(AppContext.BaseDirectory, dataRoot);
+            if (!resolution.IsReady)
+            {
+                throw new InvalidOperationException(
+                    $"Gemma runtime is not ready. Missing: {string.Join(", ", resolution.Missing)}.");
+            }
+
+            using var database = OpenDatabase(dataRoot, options);
+            // One worker for every summary in this run.
+            using var sessionWorker = new PersistentLiteRtWorker(
+                resolution.PythonExecutable!,
+                resolution.WorkerScript!,
+                resolution.ModelPath!,
+                maxNumTokens: 4096,
+                idleUnloadAfter: Timeout.InfiniteTimeSpan);
+            var builder = new SessionBuilder(
+                database,
+                new LiteRtActivitySummarizer(sessionWorker, resolution.ModelId),
+                int.TryParse(options.GetValueOrDefault("max-summaries"), out var maxSummaries)
+                    ? maxSummaries
+                    : 5);
+
+            // --seal-open closes the newest stretch too, for when scanning
+            // stops and there is no "still in progress" left to protect.
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                + (options.ContainsKey("seal-open") ? Sessionizer.QuietTailMilliseconds : 0);
+            var startsBefore = LiteRtWorkerMetrics.StartCount;
+            var built = await builder.RunAsync(now);
+            WriteJson(
+                new
+                {
+                    built.Sealed,
+                    built.Summarized,
+                    built.Failed,
+                    workerStarts = LiteRtWorkerMetrics.StartCount - startsBefore
+                },
+                json);
+            break;
+        }
+
         // Exercises the persistent worker: N generations through one process,
         // so worker starts should be 1 regardless of the run count.
         case "worker-bench":
@@ -466,6 +511,7 @@ try
                   search-context --query TEXT [--limit 30] [--data-dir PATH]
                   model-probe --runtime PATH --model PATH
                   model-generate --python PATH --worker PATH --model PATH --prompt TEXT [--backend cpu]
+                  sessionize [--max-summaries 5] [--seal-open] [--data-dir PATH] [--sqlite-vec PATH]
                   worker-bench [--runs 3] [--prompt TEXT] [--max-tokens 4096] [--data-dir PATH]
                   activity-summarize --text TEXT [--process NAME] [--title TITLE]
                   model-install --manifest PATH [--data-dir PATH]

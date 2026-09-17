@@ -138,6 +138,83 @@ public sealed class StorageTests : IDisposable
     }
 
     [Fact]
+    public void SealingASessionClaimsItsCapturesInOneStep()
+    {
+        var keyStore = new DpapiKeyStore(Path.Combine(_directory, "seal-key.bin"));
+        var databasePath = Path.Combine(_directory, "seal-memory.db");
+        using var database = Phase0Database.Open(databasePath, keyStore);
+
+        foreach (var index in Enumerable.Range(1, 3))
+        {
+            var capture = new RawCaptureEvent(
+                $"event-{index}",
+                1_000 * index,
+                "Code",
+                @"C:\Code.exe",
+                $"file-{index}.md",
+                $"HASH-{index}",
+                $"Redacted text {index}",
+                0);
+            database.SaveManualScan(
+                capture,
+                new(
+                    $"scan-{index}",
+                    1_000 * index,
+                    "Code",
+                    $"file-{index}.md",
+                    null,
+                    null,
+                    ManualScanStatus.Completed,
+                    null,
+                    capture.ContentHash,
+                    "gemma-4-e2b",
+                    10,
+                    0,
+                    0,
+                    1,
+                    1,
+                    0));
+        }
+
+        var unassigned = database.GetUnassignedCaptures();
+        Assert.Equal(3, unassigned.Count);
+        Assert.Equal("scan-1", unassigned[0].Id);
+
+        var drafts = Sessionizer.Cluster(unassigned, 4_000 + Sessionizer.QuietTailMilliseconds);
+        var draft = Assert.Single(drafts);
+        var session = new ActivitySession(
+            "session-1",
+            draft.StartedAtMilliseconds,
+            draft.EndedAtMilliseconds,
+            draft.ProcessName,
+            draft.WindowTitle,
+            draft.ScanIds,
+            null,
+            null,
+            ActivitySessionStatus.Closed);
+        database.SealSession(session, draft.ScanIds);
+
+        // Sealing is what claims the captures, so nothing is left dangling.
+        Assert.Empty(database.GetUnassignedCaptures());
+        Assert.All(
+            database.GetRecentManualScans(),
+            scan => Assert.Equal("session-1", scan.SessionId));
+
+        // Sealed but not yet summarized, so a later run can pick it up.
+        var pending = Assert.Single(database.GetUnsummarizedSessions());
+        Assert.Equal("session-1", pending.Id);
+        Assert.Equal(3, pending.ScanIds.Count);
+
+        // Its text comes back oldest first for the summary prompt.
+        Assert.Equal(
+            ["Redacted text 1", "Redacted text 2", "Redacted text 3"],
+            database.GetCaptureTexts(pending.ScanIds));
+
+        database.UpsertSession(pending with { Label = "Editing notes", Summary = "Edited files." });
+        Assert.Empty(database.GetUnsummarizedSessions());
+    }
+
+    [Fact]
     public void DedupLookupUsesContentHashIndex()
     {
         var keyStore = new DpapiKeyStore(Path.Combine(_directory, "dedup-key.bin"));

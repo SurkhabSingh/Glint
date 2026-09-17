@@ -480,6 +480,40 @@ async fn heartbeat_loop(app: AppHandle, generation: u64) {
     }
 }
 
+/// How often the loop groups captures into sessions and summarizes them.
+const SESSIONIZE_INTERVAL_MS: u64 = 60_000;
+
+/// Group captures into sessions and summarize the finished ones. Runs under
+/// the model lock because it makes model calls, so it never overlaps a scan.
+/// `seal_open` also closes the newest stretch, used when scanning stops.
+async fn run_sessionize(app: &AppHandle, seal_open: bool) -> Option<serde_json::Value> {
+    let root = crate::bridge::data_root().ok()?;
+    let cli = crate::bridge::sidecar_path(app).ok()?;
+    let mut args = vec!["sessionize".to_string()];
+    args.extend(crate::bridge::db_args(app, &root));
+    args.extend(crate::bridge::host_args());
+    if seal_open {
+        args.push("--seal-open".to_string());
+    }
+
+    let model_state: State<ScanRuntime> = app.state();
+    let _model = model_state.model_lock.lock().await;
+    let started = std::time::Instant::now();
+    let output = tokio::task::spawn_blocking(move || {
+        crate::bridge::hidden_command(&cli).args(&args).output()
+    })
+    .await
+    .ok()?
+    .ok()?;
+    crate::bridge::record_spawn(
+        "sessionize",
+        started.elapsed().as_millis(),
+        output.status.code().unwrap_or(-1),
+        None,
+    );
+    serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&output.stdout)).ok()
+}
+
 fn manual_scan_args(app: &AppHandle, root: &std::path::Path) -> Result<(PathBuf, Vec<String>), String> {
     let cli = crate::bridge::sidecar_path(app)?;
     let mut args = vec!["manual-scan".to_string()];
@@ -580,6 +614,7 @@ async fn scan_loop(app: AppHandle, generation: u64) {
     let mut last_foreground = cadence::foreground_handle();
     let mut foreground_changed_at: Option<Instant> = None;
     let mut away = false;
+    let mut last_sessionize = Instant::now();
 
     loop {
         if !is_current(&app, generation) {
@@ -646,6 +681,19 @@ async fn scan_loop(app: AppHandle, generation: u64) {
             }
         };
 
+        // Between captures, fold finished stretches into sessions and
+        // summarize them. Done here rather than after a capture so it never
+        // delays one, and under the model lock so it never overlaps one.
+        if last_sessionize.elapsed().as_millis() as u64 >= SESSIONIZE_INTERVAL_MS {
+            last_sessionize = Instant::now();
+            if let Some(result) = run_sessionize(&app, false).await {
+                let _ = app.emit("sessions-updated", &result);
+            }
+            if !is_current(&app, generation) {
+                break;
+            }
+        }
+
         // Abortable wait, so a pause is noticed within one poll interval.
         {
             let runtime: State<ScanRuntime> = app.state::<ScanRuntime>();
@@ -676,6 +724,11 @@ async fn scan_loop(app: AppHandle, generation: u64) {
         }
     };
     if should_finalize {
+        // Nothing is in progress any more, so seal and summarize the last
+        // stretch too rather than leaving it ungrouped until the next run.
+        if let Some(result) = run_sessionize(&app, true).await {
+            let _ = app.emit("sessions-updated", &result);
+        }
         let _ = app.emit(
             "scan-state",
             serde_json::json!({
