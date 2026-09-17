@@ -33,6 +33,16 @@ try {
             model-generate --python $python --worker $worker --model $gemma `
             --backend cpu --prompt "Reply with exactly GLINT_VERIFY_OK and nothing else."
         if ($LASTEXITCODE -ne 0) { throw "Gemma verification failed." }
+        # Persistent worker: three generations must share one process, so the
+        # model is loaded once instead of per call.
+        $bench = dotnet run --project .\src\Glint.Phase0.Cli --configuration Debug --no-build -- `
+            worker-bench --runs 3 --data-dir .phase0-verification | Out-String
+        if ($LASTEXITCODE -ne 0) { throw "Persistent worker verification failed." }
+        Write-Host $bench
+        $starts = ([regex]'"workerStarts":\s*(\d+)').Match($bench).Groups[1].Value
+        if ($starts -ne "1") {
+            throw "Persistent worker started $starts worker processes for 3 generations; expected 1."
+        }
         dotnet run --project .\src\Glint.Phase0.Cli --configuration Debug --no-build -- `
             activity-summarize `
             --process "Discord" `

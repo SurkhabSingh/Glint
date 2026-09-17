@@ -1,0 +1,70 @@
+using Glint.Phase0.Core;
+
+namespace Glint.Phase0.Tests;
+
+public sealed class LiteRtWorkerProtocolTests
+{
+    [Fact]
+    public void ReadyNoticeIsNotMistakenForAResponse()
+    {
+        Assert.True(LiteRtWorkerProtocol.IsNotification(
+            """{"event":"ready","loadMs":197.7,"pid":1234,"maxNumTokens":4096}"""));
+    }
+
+    [Theory]
+    [InlineData("""{"id":1,"ok":true,"text":"Ok","elapsedMilliseconds":344.8}""")]
+    [InlineData("""{"id":1,"ok":false,"error":"RuntimeError","elapsedMilliseconds":21.5}""")]
+    [InlineData("""{"id":2,"ok":true,"op":"ping","elapsedMilliseconds":0.01}""")]
+    public void ResponsesAreNotTreatedAsNotices(string line)
+    {
+        Assert.False(LiteRtWorkerProtocol.IsNotification(line));
+    }
+
+    [Theory]
+    [InlineData("not json at all")]
+    [InlineData("")]
+    [InlineData("[1,2,3]")]
+    public void UnparseableLinesAreLeftToTheCaller(string line)
+    {
+        // Reported as a protocol error rather than silently skipped, which
+        // would hang the read loop.
+        Assert.False(LiteRtWorkerProtocol.IsNotification(line));
+    }
+
+    [Fact]
+    public void EmptyPromptsAreRejectedBeforeSpawningAWorker()
+    {
+        Assert.Throws<ArgumentException>(
+            () => LiteRtWorkerProtocol.ValidateRequest(new("   ")));
+    }
+
+    [Fact]
+    public void OversizePromptsAreRejectedBeforeSpawningAWorker()
+    {
+        // The native runtime rejects these within milliseconds anyway; the
+        // summarizer relies on this to step down to a smaller budget.
+        var prompt = new string('x', (LiteRtWorkerProtocol.MaxEstimatedInputTokens + 10) * 4);
+
+        var error = Assert.Throws<InvalidOperationException>(
+            () => LiteRtWorkerProtocol.ValidateRequest(new(prompt)));
+
+        Assert.Contains("Prompt too large", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PromptsInsideTheBudgetAreAccepted()
+    {
+        var prompt = new string('x', (LiteRtWorkerProtocol.MaxEstimatedInputTokens - 10) * 4);
+
+        LiteRtWorkerProtocol.ValidateRequest(new(prompt));
+    }
+
+    [Fact]
+    public void TheSystemPromptCountsTowardsTheBudget()
+    {
+        var half = new string('x', LiteRtWorkerProtocol.MaxEstimatedInputTokens * 2);
+
+        Assert.Throws<InvalidOperationException>(
+            () => LiteRtWorkerProtocol.ValidateRequest(new(half, SystemPrompt: half + "xxxxx")));
+    }
+}

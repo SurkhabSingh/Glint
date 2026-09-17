@@ -29,12 +29,6 @@ public sealed class LiteRtWorkerClient : ILiteRtGenerator
     private static readonly JsonSerializerOptions JsonOptions =
         new(JsonSerializerDefaults.Web);
 
-    private static long _startCount;
-
-    /// Worker processes started in this process so far. Each start reloads
-    /// the model, so this is the headline cost of the per-request worker.
-    public static long StartCount => System.Threading.Interlocked.Read(ref _startCount);
-
     private readonly string _pythonExecutable;
     private readonly string _workerScript;
     private readonly string _modelPath;
@@ -61,25 +55,7 @@ public sealed class LiteRtWorkerClient : ILiteRtGenerator
         CancellationToken cancellationToken = default)
     {
         ValidateFiles();
-        ArgumentNullException.ThrowIfNull(request);
-        if (string.IsNullOrWhiteSpace(request.Prompt))
-        {
-            throw new ArgumentException("Prompt cannot be empty.", nameof(request));
-        }
-
-        // Fast-fail inputs the native runtime rejects outright (observed:
-        // send_message fails within milliseconds past ~1.9k input tokens on
-        // gemma-4-e2b, regardless of max-tokens). A clear error beats native
-        // gibberish and, for the summarizer, cascades to the next smaller
-        // context budget instead of burning a full worker spawn.
-        var estimatedInputTokens =
-            (request.Prompt.Length + (request.SystemPrompt?.Length ?? 0)) / 4;
-        if (estimatedInputTokens > 1_600)
-        {
-            throw new InvalidOperationException(
-                $"Prompt too large for the local worker: ~{estimatedInputTokens} estimated " +
-                $"input tokens exceed the ~1,600-token budget. Shrink context and retry.");
-        }
+        LiteRtWorkerProtocol.ValidateRequest(request);
 
         var start = new ProcessStartInfo
         {
@@ -101,7 +77,7 @@ public sealed class LiteRtWorkerClient : ILiteRtGenerator
 
         using var process = Process.Start(start)
             ?? throw new InvalidOperationException("LiteRT-LM worker could not be started.");
-        System.Threading.Interlocked.Increment(ref _startCount);
+        LiteRtWorkerMetrics.RecordStart();
         var processTimer = Stopwatch.StartNew();
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
@@ -114,8 +90,27 @@ public sealed class LiteRtWorkerClient : ILiteRtGenerator
             await process.StandardInput.FlushAsync(timeoutSource.Token).ConfigureAwait(false);
             process.StandardInput.Close();
 
-            var responseLine = await process.StandardOutput.ReadLineAsync(timeoutSource.Token)
-                .ConfigureAwait(false);
+            // The worker announces itself before serving anything, so skip
+            // notices until the response for this request arrives.
+            string? responseLine = null;
+            while (true)
+            {
+                var line = await process.StandardOutput.ReadLineAsync(timeoutSource.Token)
+                    .ConfigureAwait(false);
+                if (line is null)
+                {
+                    break;
+                }
+
+                if (LiteRtWorkerProtocol.IsNotification(line))
+                {
+                    continue;
+                }
+
+                responseLine = line;
+                break;
+            }
+
             await process.WaitForExitAsync(timeoutSource.Token).ConfigureAwait(false);
             var error = await errorTask.ConfigureAwait(false);
             if (process.ExitCode != 0)

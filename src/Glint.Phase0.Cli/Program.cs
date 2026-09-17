@@ -224,6 +224,16 @@ try
             }
 
             using var database = OpenDatabase(dataRoot, options);
+            // One worker for the whole scan: the summarizer retries at 4000,
+            // 2000 and 1000 context characters, which used to mean up to
+            // three process starts and three model loads for a single scan.
+            // Idle unload is off because this process is short-lived anyway.
+            using var scanWorker = new PersistentLiteRtWorker(
+                resolution.PythonExecutable!,
+                resolution.WorkerScript!,
+                resolution.ModelPath!,
+                maxNumTokens: 4096,
+                idleUnloadAfter: Timeout.InfiniteTimeSpan);
             var coordinator = new ManualScanCoordinator(
                 new ForegroundWindowInspector(HostProcessId(options)),
                 new UiAutomationService(),
@@ -231,18 +241,14 @@ try
                 new WindowsGraphicsCaptureService(
                     options.ContainsKey("software-device")),
                 new DeterministicRedactor(),
-                new LiteRtActivitySummarizer(
-                    resolution.PythonExecutable!,
-                    resolution.WorkerScript!,
-                    resolution.ModelPath!,
-                    resolution.ModelId),
+                new LiteRtActivitySummarizer(scanWorker, resolution.ModelId),
                 database);
-            var workerStartsBefore = LiteRtWorkerClient.StartCount;
+            var workerStartsBefore = LiteRtWorkerMetrics.StartCount;
             var outcome = await coordinator.ScanAsync();
             WriteJson(
                 outcome with
                 {
-                    WorkerStarts = LiteRtWorkerClient.StartCount - workerStartsBefore
+                    WorkerStarts = LiteRtWorkerMetrics.StartCount - workerStartsBefore
                 },
                 json);
             break;
@@ -296,6 +302,63 @@ try
                     Seed: 1),
                 TimeSpan.FromMinutes(5));
             WriteJson(result, json);
+            break;
+        }
+
+        // Exercises the persistent worker: N generations through one process,
+        // so worker starts should be 1 regardless of the run count.
+        case "worker-bench":
+        {
+            var resolution = LiteRtRuntimeLocator.Resolve(AppContext.BaseDirectory, dataRoot);
+            if (!resolution.IsReady)
+            {
+                throw new InvalidOperationException(
+                    $"Gemma runtime is not ready. Missing: {string.Join(", ", resolution.Missing)}.");
+            }
+
+            var runs = int.TryParse(options.GetValueOrDefault("runs"), out var parsedRuns)
+                ? Math.Clamp(parsedRuns, 1, 20)
+                : 3;
+            var benchPrompt = options.GetValueOrDefault(
+                "prompt",
+                "Reply with the single word: ok");
+            using var worker = new PersistentLiteRtWorker(
+                resolution.PythonExecutable!,
+                resolution.WorkerScript!,
+                resolution.ModelPath!,
+                options.GetValueOrDefault("backend", "cpu"),
+                int.TryParse(options.GetValueOrDefault("max-tokens"), out var benchTokens)
+                    ? benchTokens
+                    : 4096);
+
+            var startsBefore = LiteRtWorkerMetrics.StartCount;
+            var timings = new List<object>();
+            for (var run = 1; run <= runs; run++)
+            {
+                var timer = System.Diagnostics.Stopwatch.StartNew();
+                var generated = await worker.GenerateAsync(
+                    new(benchPrompt),
+                    TimeSpan.FromMinutes(5));
+                timer.Stop();
+                timings.Add(new
+                {
+                    run,
+                    wallMilliseconds = timer.ElapsedMilliseconds,
+                    generationMilliseconds = Math.Round(
+                        generated.GenerationElapsed.TotalMilliseconds),
+                    characters = generated.Text.Length
+                });
+            }
+
+            WriteJson(
+                new
+                {
+                    runs,
+                    workerStarts = LiteRtWorkerMetrics.StartCount - startsBefore,
+                    stillLoaded = worker.IsLoaded,
+                    timings
+                },
+                json);
             break;
         }
 
@@ -403,6 +466,7 @@ try
                   search-context --query TEXT [--limit 30] [--data-dir PATH]
                   model-probe --runtime PATH --model PATH
                   model-generate --python PATH --worker PATH --model PATH --prompt TEXT [--backend cpu]
+                  worker-bench [--runs 3] [--prompt TEXT] [--max-tokens 4096] [--data-dir PATH]
                   activity-summarize --text TEXT [--process NAME] [--title TITLE]
                   model-install --manifest PATH [--data-dir PATH]
                   model-repair --manifest PATH [--data-dir PATH]
