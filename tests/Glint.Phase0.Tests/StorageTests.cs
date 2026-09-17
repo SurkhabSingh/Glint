@@ -137,6 +137,19 @@ public sealed class StorageTests : IDisposable
         Assert.Equal("reply to the warranty", session.HeadText);
     }
 
+    [Fact]
+    public void DedupLookupUsesContentHashIndex()
+    {
+        var keyStore = new DpapiKeyStore(Path.Combine(_directory, "dedup-key.bin"));
+        var databasePath = Path.Combine(_directory, "dedup-memory.db");
+        using var database = Phase0Database.Open(databasePath, keyStore);
+
+        var plan = database.ExplainDedupLookup();
+
+        Assert.Contains("idx_manual_scans_content_hash", plan, StringComparison.Ordinal);
+        Assert.DoesNotContain("SCAN manual_scans", plan, StringComparison.Ordinal);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_directory))

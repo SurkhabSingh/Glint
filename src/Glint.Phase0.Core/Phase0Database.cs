@@ -343,15 +343,34 @@ public interface ICaptureEventStore
             reader.IsDBNull(11) ? string.Empty : reader.GetString(11),
             reader.IsDBNull(12) ? string.Empty : reader.GetString(12));
 
+    private const string ManualScanContentHashExistsSql =
+        "SELECT EXISTS(SELECT 1 FROM manual_scans WHERE content_hash = $hash);";
+
     public bool ContainsManualScanContentHash(string contentHash)
     {
         using var command = _connection.CreateCommand();
-        command.CommandText =
-            "SELECT EXISTS(SELECT 1 FROM manual_scans WHERE content_hash = $hash);";
+        command.CommandText = ManualScanContentHashExistsSql;
         command.Parameters.AddWithValue("$hash", contentHash);
         return Convert.ToInt64(
             command.ExecuteScalar(),
             System.Globalization.CultureInfo.InvariantCulture) == 1;
+    }
+
+    // Query plan of the per-tick dedup lookup, so tests can assert it stays
+    // an index search rather than a scan that grows with history.
+    internal string ExplainDedupLookup()
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText = "EXPLAIN QUERY PLAN " + ManualScanContentHashExistsSql;
+        command.Parameters.AddWithValue("$hash", string.Empty);
+        using var reader = command.ExecuteReader();
+        var details = new List<string>();
+        while (reader.Read())
+        {
+            details.Add(reader.GetString(3));
+        }
+
+        return string.Join(Environment.NewLine, details);
     }
 
     public IReadOnlyList<ManualScanRecord> GetRecentManualScans(int limit = 50)
@@ -691,6 +710,12 @@ public interface ICaptureEventStore
             INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
             VALUES (5, CAST(unixepoch('subsec') * 1000 AS INTEGER));
 
+            CREATE INDEX IF NOT EXISTS idx_manual_scans_content_hash
+            ON manual_scans(content_hash);
+
+            CREATE INDEX IF NOT EXISTS idx_manual_scans_session_id
+            ON manual_scans(session_id);
+
             CREATE TABLE IF NOT EXISTS activity_sessions (
                 id TEXT PRIMARY KEY,
                 started_at_ms INTEGER NOT NULL,
@@ -712,6 +737,9 @@ public interface ICaptureEventStore
 
             INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
             VALUES (6, CAST(unixepoch('subsec') * 1000 AS INTEGER));
+
+            INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
+            VALUES (7, CAST(unixepoch('subsec') * 1000 AS INTEGER));
             """);
     }
 
