@@ -113,10 +113,13 @@ public sealed class PrivacyGate
                 "target process elevation could not be verified");
         }
 
-        // Glint runs elevated as a single process (see app.manifest
-        // requireAdministrator), so elevated foreground windows are within
-        // its own integrity level and safe to inspect. Unknown elevation
-        // still fails closed above.
+        if (window.IsElevated)
+        {
+            return PrivacyDecision.Suppress(
+                SuppressReason.ElevatedProcess,
+                "capture is disabled for elevated applications");
+        }
+
         if (window.IsDisplayProtected)
         {
             return PrivacyDecision.Suppress(

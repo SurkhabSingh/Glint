@@ -73,16 +73,6 @@ public sealed class PrivacyGateTests
     }
 
     [Fact]
-    public void AllowsElevatedWindowSinceGlintRunsElevated()
-    {
-        var decision = _gate.Evaluate(
-            Window() with { IsElevated = true },
-            new(true, false, true, "known"));
-
-        Assert.True(decision.Allowed);
-    }
-
-    [Fact]
     public void SuppressesDesktopBackgroundWithoutCapture()
     {
         var decision = _gate.Evaluate(
@@ -102,7 +92,7 @@ public sealed class PrivacyGateTests
                 Window() with { DesktopStateDetermined = false },
                 SuppressReason.DesktopStateUnknown
             },
-
+            { Window() with { IsElevated = true }, SuppressReason.ElevatedProcess },
             { Window() with { IsDisplayProtected = true }, SuppressReason.DisplayProtected }
         };
 
