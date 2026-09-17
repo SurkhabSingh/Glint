@@ -81,6 +81,17 @@ public sealed class PrivacyGate
             return PrivacyDecision.Suppress(SuppressReason.Minimized, "foreground window is minimized or empty");
         }
 
+        // The desktop background (wallpaper + icons) carries no task context
+        // and OCRs poorly. Timeline hook rows still record the visit; only
+        // capture/inference is skipped here.
+        if (string.Equals(window.ProcessName, "explorer", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(window.Title, "Program Manager", StringComparison.OrdinalIgnoreCase))
+        {
+            return PrivacyDecision.Suppress(
+                SuppressReason.DesktopBackground,
+                "foreground window is the desktop background");
+        }
+
         if (!window.DesktopStateDetermined)
         {
             return PrivacyDecision.Suppress(
@@ -102,13 +113,10 @@ public sealed class PrivacyGate
                 "target process elevation could not be verified");
         }
 
-        if (window.IsElevated)
-        {
-            return PrivacyDecision.Suppress(
-                SuppressReason.ElevatedProcess,
-                "capture is disabled for elevated applications");
-        }
-
+        // Glint runs elevated as a single process (see app.manifest
+        // requireAdministrator), so elevated foreground windows are within
+        // its own integrity level and safe to inspect. Unknown elevation
+        // still fails closed above.
         if (window.IsDisplayProtected)
         {
             return PrivacyDecision.Suppress(

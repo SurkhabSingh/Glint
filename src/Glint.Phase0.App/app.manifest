@@ -6,6 +6,16 @@
       <supportedOS Id="{4f476546-937d-4fbe-8e26-3b45c3d79267}" />
     </application>
   </compatibility>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
+        <!-- Glint runs as one elevated process so elevated foreground
+             windows (admin consoles, Task Manager, installers) are inside
+             its integrity level and capturable. Expects a UAC prompt. -->
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
       <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">

@@ -12,6 +12,7 @@ mod bridge;
 mod glass;
 mod glint;
 mod runtime;
+mod timeline;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -82,8 +83,8 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         MenuItem::with_id(app, "tray-open-bar", "Open command bar\tCtrl+Alt+G", true, None::<&str>)?;
     let open_dashboard = MenuItem::with_id(app, "tray-open", "Open Glint", true, None::<&str>)?;
     let search = MenuItem::with_id(app, "tray-search", "Search context", true, None::<&str>)?;
-    let start = MenuItem::with_id(app, "tray-start", "Start scanning", true, None::<&str>)?;
-    let pause = MenuItem::with_id(app, "tray-pause", "Pause scanning", false, None::<&str>)?;
+    let start = MenuItem::with_id(app, "tray-start", "Start scanning\tCtrl+Alt+S", true, None::<&str>)?;
+    let pause = MenuItem::with_id(app, "tray-pause", "Pause scanning\tCtrl+Alt+P", false, None::<&str>)?;
     let exit = MenuItem::with_id(app, "tray-exit", "Exit Glint", true, None::<&str>)?;
     use tauri::menu::PredefinedMenuItem;
     let sep1 = PredefinedMenuItem::separator(app)?;
@@ -112,44 +113,8 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 show_main(app);
                 let _ = app.emit("open-search", serde_json::json!({ "query": null }));
             }
-            "tray-start" => {
-                let handle = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    match glint::glint_start_scanning(handle.clone()) {
-                        Ok(state) => {
-                            let _ = handle.emit("scan-state", &state);
-                        }
-                        Err(error) => {
-                            let _ = handle.emit(
-                                "scan-state",
-                                serde_json::json!({
-                                    "scanning": false,
-                                    "captureSummary": error,
-                                }),
-                            );
-                        }
-                    }
-                });
-            }
-            "tray-pause" => {
-                let handle = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    match glint::glint_pause_scanning(handle.clone()).await {
-                        Ok(state) => {
-                            let _ = handle.emit("scan-state", &state);
-                        }
-                        Err(error) => {
-                            let _ = handle.emit(
-                                "scan-state",
-                                serde_json::json!({
-                                    "scanning": false,
-                                    "captureSummary": error,
-                                }),
-                            );
-                        }
-                    }
-                });
-            }
+            "tray-start" => start_scan_action(app),
+            "tray-pause" => pause_scan_action(app),
             "tray-exit" => {
                 ALLOW_EXIT.store(true, Ordering::SeqCst);
                 app.exit(0);
@@ -171,28 +136,96 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Start scanning + broadcast state (shared by tray menu and hotkey).
+fn start_scan_action(app: &AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        match glint::glint_start_scanning(handle.clone()) {
+            Ok(state) => {
+                let _ = handle.emit("scan-state", &state);
+            }
+            Err(error) => {
+                let _ = handle.emit(
+                    "scan-state",
+                    serde_json::json!({
+                        "scanning": false,
+                        "captureSummary": error,
+                    }),
+                );
+            }
+        }
+    });
+}
+
+/// Pause scanning + broadcast state (shared by tray menu and hotkey).
+fn pause_scan_action(app: &AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        match glint::glint_pause_scanning(handle.clone()).await {
+            Ok(state) => {
+                let _ = handle.emit("scan-state", &state);
+            }
+            Err(error) => {
+                let _ = handle.emit(
+                    "scan-state",
+                    serde_json::json!({
+                        "scanning": false,
+                        "captureSummary": error,
+                    }),
+                );
+            }
+        }
+    });
+}
+
+/// Global scan hotkeys. Ctrl+Alt+G opens the command bar (legacy binding);
+/// Ctrl+Alt+S starts and Ctrl+Alt+P pauses scanning directly.
+const SCAN_HOTKEYS: [(&str, &str); 3] = [
+    ("ctrl+alt+g", "command-bar"),
+    ("ctrl+alt+s", "start"),
+    ("ctrl+alt+p", "pause"),
+];
+
+fn shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    use std::collections::HashMap;
+    use tauri_plugin_global_shortcut::Shortcut;
+    let mut ids: HashMap<u32, &'static str> = HashMap::new();
+    for (name, _) in SCAN_HOTKEYS {
+        if let Ok(shortcut) = name.parse::<Shortcut>() {
+            ids.insert(shortcut.id(), name);
+        }
+    }
+    let names: Vec<&str> = SCAN_HOTKEYS.iter().map(|(name, _)| *name).collect();
+    tauri_plugin_global_shortcut::Builder::new()
+        .with_shortcuts(names)
+        .map(|builder| {
+            builder
+                .with_handler(move |app, shortcut, event| {
+                    if event.state != ShortcutState::Pressed {
+                        return;
+                    }
+                    match ids.get(&shortcut.id()).copied().unwrap_or("") {
+                        "ctrl+alt+g" => toggle_command_bar(app),
+                        "ctrl+alt+s" => start_scan_action(app),
+                        "ctrl+alt+p" => pause_scan_action(app),
+                        _ => {}
+                    }
+                })
+                .build()
+        })
+        .unwrap_or_else(|error| {
+            eprintln!("Glint global shortcuts unavailable: {error}");
+            tauri_plugin_global_shortcut::Builder::<tauri::Wry>::new().build()
+        })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(glint::ScanRuntime::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_shortcut("ctrl+alt+g")
-                .map(|builder| {
-                    builder
-                        .with_handler(|app, _shortcut, event| {
-                            if event.state == ShortcutState::Pressed {
-                                toggle_command_bar(app);
-                            }
-                        })
-                        .build()
-                })
-                .unwrap_or_else(|_| {
-                    tauri_plugin_global_shortcut::Builder::<tauri::Wry>::new().build()
-                }),
-        )
+        .plugin(shortcut_plugin())
         .setup(|app| {
             // Pin LiteRT python/worker env for every sidecar this process
             // spawns (tray and hotkey actions included).
@@ -201,12 +234,17 @@ pub fn run() {
             // tint; the frontend re-tints on every theme change).
             let (r, g, b, a) = glass::tuning::DEFAULT_TINT;
             glass::apply_tint(app.handle(), r, g, b, a);
+            // Foreground-switch hook for the live timeline (pump drops
+            // everything while scanning is off).
+            timeline::start_hook(app.handle().clone());
             if let Err(error) = build_tray(app.handle()) {
                 eprintln!("Glint tray unavailable: {error}");
             }
-            // The dashboard starts hidden in the tray (ports OnLaunched).
+            // The dashboard opens as a full window on launch; it only
+            // hides to the tray after the user closes (or minimizes) it.
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.hide();
+                let _ = window.show();
+                let _ = window.set_focus();
             }
             Ok(())
         })
@@ -253,6 +291,9 @@ pub fn run() {
             glint::glint_ensure_runtime,
             glint::glint_setup_runtime,
             glint::glint_set_glass_tint,
+            glint::glint_timeline,
+            glint::glint_shortcut_status,
+            glint::glint_ask,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

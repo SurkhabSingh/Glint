@@ -17,6 +17,8 @@ import ActivityPage from "./pages/ActivityPage";
 import SearchPage from "./pages/SearchPage";
 import DiagnosticsPage from "./pages/DiagnosticsPage";
 import SettingsPage from "./pages/SettingsPage";
+import TimelinePage from "./pages/TimelinePage";
+import AgentPage from "./pages/AgentPage";
 import {
   glintInitialize,
   glintSetGlassTint,
@@ -96,6 +98,7 @@ function App() {
   const [runtime, setRuntime] = useState(null);
   const [settingUp, setSettingUp] = useState(false);
   const [setupLog, setSetupLog] = useState([]);
+  const [pending, setPending] = useState([]);
 
   const safeTheme = sanitizeTheme(theme);
   const windowBg = hexToRgba(safeTheme.bg, safeTheme.bgAlpha);
@@ -123,6 +126,9 @@ function App() {
   }, [windowBg, safeTheme]);
 
   const applyOutcome = useCallback((payload) => {
+    if (payload?.tickId != null) {
+      setPending((prev) => prev.filter((t) => t.tickId !== payload.tickId));
+    }
     if (!payload || payload.kind === -1) {
       if (payload?.captureSummary) setCaptureSummary(payload.captureSummary);
       if (payload?.overall) setOverall(payload.overall);
@@ -137,7 +143,10 @@ function App() {
 
   const applyScanState = useCallback((state) => {
     if (!state) return;
-    if (typeof state.scanning === "boolean") setScanning(state.scanning);
+    if (typeof state.scanning === "boolean") {
+      setScanning(state.scanning);
+      if (!state.scanning) setPending([]);
+    }
     if (state.captureSummary) setCaptureSummary(state.captureSummary);
     if (state.overall) setOverall(state.overall);
   }, []);
@@ -189,8 +198,16 @@ function App() {
     let unlistenOutcome;
     let unlistenState;
     let unlistenSearch;
+    let unlistenTick;
+    listen("scan-tick-started", (event) => {
+      const tick = event.payload;
+      if (tick?.tickId == null) return;
+      setPending((prev) =>
+        [...prev, tick].filter((t, i, all) => all.findIndex((x) => x.tickId === t.tickId) === i).slice(-3)
+      );
+    }).then((fn) => (unlistenTick = fn));
     listen("scan-outcome", (event) => applyOutcome(event.payload)).then(
-      (fn) => (unlistenOutcome = fn),
+      (fn) => (unlistenOutcome = fn)
     );
     listen("scan-state", (event) => applyScanState(event.payload)).then(
       (fn) => (unlistenState = fn),
@@ -211,6 +228,7 @@ function App() {
       unlistenOutcome?.();
       unlistenState?.();
       unlistenSearch?.();
+      unlistenTick?.();
     };
   }, [windowLabel, applyOutcome, applyScanState, runSearch]);
 
@@ -470,6 +488,7 @@ function App() {
             captureSummary={captureSummary}
             historySummary={historySummaryText(history.length)}
             history={history}
+            pending={pending}
             scanning={scanning}
             busy={busy}
             onStart={handleStart}
@@ -494,6 +513,8 @@ function App() {
           />
         )}
         {page === "settings" && <SettingsPage />}
+        {page === "timeline" && <TimelinePage />}
+        {page === "agent" && <AgentPage />}
         {page === "diagnostics" && (
           <DiagnosticsPage
             foregroundSummary={foregroundSummary}

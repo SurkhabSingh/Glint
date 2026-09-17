@@ -290,7 +290,9 @@ public sealed class ManualScanCoordinatorTests
             CancellationToken cancellationToken = default)
         {
             CallCount++;
-            if (request.Prompt.Length > 10_000)
+            // First-rung prompt is ~4k context + ~1.7k instruction ≈ 5.7k;
+            // second rung ≈ 3.7k. Threshold sits between them.
+            if (request.Prompt.Length > 5_000)
             {
                 return Task.FromException<LiteRtGenerationResult>(
                     new InvalidOperationException(

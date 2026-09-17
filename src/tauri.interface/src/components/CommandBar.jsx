@@ -170,7 +170,7 @@ function CommandBar() {
           </button>
         ))}
       </div>
-      <div className="cmdbar-hint">Ctrl+Alt+G toggles this command bar. Esc closes it.</div>
+      <div className="cmdbar-hint">Ctrl+Alt+G toggles this command bar. Ctrl+Alt+S starts, Ctrl+Alt+P pauses scanning. Esc closes it.</div>
     </div>
   );
 }

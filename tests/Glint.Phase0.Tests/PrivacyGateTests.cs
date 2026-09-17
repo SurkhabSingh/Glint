@@ -72,6 +72,26 @@ public sealed class PrivacyGateTests
         Assert.Equal(SuppressReason.AutomationStateUnknown, decision.Reason);
     }
 
+    [Fact]
+    public void AllowsElevatedWindowSinceGlintRunsElevated()
+    {
+        var decision = _gate.Evaluate(
+            Window() with { IsElevated = true },
+            new(true, false, true, "known"));
+
+        Assert.True(decision.Allowed);
+    }
+
+    [Fact]
+    public void SuppressesDesktopBackgroundWithoutCapture()
+    {
+        var decision = _gate.Evaluate(
+            Window("Program Manager") with { ProcessName = "explorer" },
+            new(true, false, true, "known"));
+
+        Assert.Equal(SuppressReason.DesktopBackground, decision.Reason);
+    }
+
     public static TheoryData<ForegroundWindowInfo, SuppressReason> UnsafeWindows =>
         new()
         {
@@ -82,7 +102,7 @@ public sealed class PrivacyGateTests
                 Window() with { DesktopStateDetermined = false },
                 SuppressReason.DesktopStateUnknown
             },
-            { Window() with { IsElevated = true }, SuppressReason.ElevatedProcess },
+
             { Window() with { IsDisplayProtected = true }, SuppressReason.DisplayProtected }
         };
 

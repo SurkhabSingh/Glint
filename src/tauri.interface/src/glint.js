@@ -18,6 +18,22 @@ export const glintImportModel = (modelPath) =>
   invoke("glint_import_model", { modelPath });
 export const glintEnsureRuntime = () => invoke("glint_ensure_runtime");
 export const glintSetupRuntime = () => invoke("glint_setup_runtime");
+export const glintTimeline = (date = null) =>
+  invoke("glint_timeline", { date });
+export const glintShortcutStatus = () => invoke("glint_shortcut_status");
+export const glintAsk = (question, scope, day = null) =>
+  invoke("glint_ask", { question, scope, day });
+
+/** Clock time with milliseconds: "7:34:13.043 PM" (accountability rows). */
+export function formatClock(ms) {
+  const date = new Date(Number(ms));
+  let hours = date.getHours();
+  const ampm = hours >= 12 ? "PM" : "AM";
+  hours = hours % 12;
+  if (hours === 0) hours = 12;
+  const pad = (n, w = 2) => String(n).padStart(w, "0");
+  return `${hours}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)} ${ampm}`;
+}
 export const glintSetGlassTint = ({ r, g, b, alpha }) =>
   invoke("glint_set_glass_tint", { r, g, b, alpha });
 export const glintStartScanning = () => invoke("glint_start_scanning");

@@ -41,6 +41,33 @@ const ICONS = {
       />
     </svg>
   ),
+  timeline: (
+    <svg
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+    >
+      <circle cx="8" cy="8" r="6.2" />
+      <path d="M8 4.6V8l2.3 1.5" strokeLinecap="round" />
+    </svg>
+  ),
+  agent: (
+    <svg
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+    >
+      <path
+        d="M2 3.5h12v7H8l-3.5 3v-3H2v-7z"
+        strokeLinejoin="round"
+      />
+      <circle cx="5.5" cy="7" r="0.6" fill="currentColor" stroke="none" />
+      <circle cx="8" cy="7" r="0.6" fill="currentColor" stroke="none" />
+      <circle cx="10.5" cy="7" r="0.6" fill="currentColor" stroke="none" />
+    </svg>
+  ),
   settings: (
     <svg
       viewBox="0 0 24 24"
@@ -81,6 +108,8 @@ function NavRail({ page, onNavigate }) {
     { id: "activity", label: "Activity" },
     { id: "search", label: "Search" },
     { id: "diagnostics", label: "Diag." },
+    { id: "timeline", label: "Timeline" },
+    { id: "agent", label: "Agent" },
   ];
   return (
     <nav className="nav-rail" aria-label="Glint sections">

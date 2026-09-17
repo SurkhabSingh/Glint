@@ -51,7 +51,10 @@ public enum SuppressReason
     AutomationStateUnknown,
     BlocklistedApplication,
     PrivateBrowsing,
-    SensitiveWindowTitle
+    SensitiveWindowTitle,
+    // Appended last on purpose: CLI JSON carries these as numbers, so
+    // existing values must never renumber.
+    DesktopBackground
 }
 
 public sealed record PrivacyDecision(

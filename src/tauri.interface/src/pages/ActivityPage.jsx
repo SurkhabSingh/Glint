@@ -1,5 +1,5 @@
 import StatusBanner from "../components/StatusBanner";
-import ScanCard from "../components/ScanCard";
+import ScanCard, { PendingScanCard } from "../components/ScanCard";
 
 /** Ports the WinUI Activity page: header, InfoBar, Capture card, history. */
 function ActivityPage({
@@ -8,6 +8,7 @@ function ActivityPage({
   captureSummary,
   historySummary,
   history,
+  pending,
   scanning,
   busy,
   onStart,
@@ -83,6 +84,9 @@ function ActivityPage({
         <h2 className="glint-section-title">Scanned activity</h2>
         <p className="glint-section-sub">{historySummary}</p>
         <div className="scan-list">
+          {(pending ?? []).map((tick) => (
+            <PendingScanCard key={tick.tickId} tick={tick} />
+          ))}
           {history.map((scan) => (
             <ScanCard key={scan.id} scan={scan} />
           ))}

@@ -5,6 +5,7 @@
 //! `Glint.Phase0.Cli` sidecar — see `bridge.rs` for the transport.
 //! All user-facing strings mirror the WinUI view model verbatim.
 
+use chrono::TimeZone;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -23,7 +24,7 @@ const OUTCOME_KINDS: [&str; 6] = [
     "Failed",
 ];
 
-const SUPPRESS_REASONS: [&str; 13] = [
+const SUPPRESS_REASONS: [&str; 14] = [
     "NoForegroundWindow",
     "SelfCapture",
     "Minimized",
@@ -37,6 +38,7 @@ const SUPPRESS_REASONS: [&str; 13] = [
     "BlocklistedApplication",
     "PrivateBrowsing",
     "SensitiveWindowTitle",
+    "DesktopBackground",
 ];
 
 fn kind_name(kind: i64) -> &'static str {
@@ -46,7 +48,7 @@ fn kind_name(kind: i64) -> &'static str {
         .unwrap_or("Failed")
 }
 
-fn reason_name(reason: i64) -> &'static str {
+pub(crate) fn reason_name(reason: i64) -> &'static str {
     SUPPRESS_REASONS
         .get(reason as usize)
         .copied()
@@ -79,6 +81,59 @@ fn overall_info(message: String) -> serde_json::Value {
         "message": message,
         "severity": "info",
     })
+}
+
+/// Append a failure fingerprint for post-mortem diagnosis
+/// (data_root/ask-failures.log): prompt hash + sizes + worker stderr head.
+/// Never includes prompt text or captured content.
+fn log_ask_failure(question: &str, prompt_chars: usize, scoped_count: usize, detail: &str) {
+    let line = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        "question_chars": question.chars().count(),
+        "prompt_chars": prompt_chars,
+        "scoped_count": scoped_count,
+        "detail": detail.chars().take(500).collect::<String>(),
+    });
+    if let Ok(root) = crate::bridge::data_root() {
+        let path = root.join("ask-failures.log");
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(
+                file,
+                "{}",
+                serde_json::to_string(&line).unwrap_or_default()
+            );
+        }
+    }
+}
+
+/// Translate raw worker/sidecar stderr into something actionable while
+/// keeping the technical detail for diagnosis (capped in length).
+fn friendly_model_error(stderr: &str) -> String {
+    let raw = stderr.trim();
+    if raw.is_empty() {
+        return "The local model produced no output.".to_string();
+    }
+    let transient = raw.contains("litert_lm_conversation_send_message failed")
+        || raw.contains("LiteRT-LM worker exited")
+        || raw.contains("did not deliver")
+        || raw.contains("timed out")
+        || raw.contains("Timeout");
+    let mut detail: String = raw.chars().take(500).collect();
+    if detail.len() < raw.len() {
+        detail.push('…');
+    }
+    if transient {
+        format!(
+            "The local model stumbled (worker error, usually transient — asked again automatically). If this persists, pause scanning and retry. Technical detail: {detail}"
+        )
+    } else {
+        detail
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +317,11 @@ fn search_summary(query: &str, count: usize) -> String {
 // Scan-outcome payload (ports ApplyScanOutcome)
 // ---------------------------------------------------------------------------
 
-fn outcome_payload(outcome: &serde_json::Value) -> serde_json::Value {
+/// Monotonic tick ids so the frontend can match a live "capturing…"
+/// card (`scan-tick-started`) with its eventual `scan-outcome`.
+static TICK_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn outcome_payload(outcome: &serde_json::Value, tick_id: Option<u64>) -> serde_json::Value {
     let kind = outcome.get("kind").and_then(|v| v.as_i64()).unwrap_or(5);
     let kind_name = kind_name(kind);
     let detail = outcome
@@ -314,6 +373,7 @@ fn outcome_payload(outcome: &serde_json::Value) -> serde_json::Value {
         "suppressReason": reason,
         "captureSummary": capture_summary,
         "overall": overall,
+        "tickId": tick_id,
     })
 }
 
@@ -339,6 +399,10 @@ fn take_child(app: &AppHandle) -> Option<tokio::process::Child> {
 pub struct ScanRuntime {
     state: Mutex<ScanState>,
     cancel: watch::Sender<u64>,
+    /// Serializes every local-model invocation (scan ticks, single
+    /// captures, agent questions) so two model processes never contend
+    /// for RAM with overlapping full loads.
+    model_lock: tokio::sync::Mutex<()>,
 }
 
 impl Default for ScanRuntime {
@@ -347,14 +411,50 @@ impl Default for ScanRuntime {
         Self {
             state: Mutex::new(ScanState::default()),
             cancel,
+            model_lock: tokio::sync::Mutex::new(()),
         }
     }
 }
+
+
 
 fn is_current(app: &AppHandle, generation: u64) -> bool {
     let runtime: State<ScanRuntime> = app.state();
     let state = runtime.state.lock().unwrap();
     state.scanning && state.generation == generation
+}
+
+/// Live read for the timeline hook pump: logging runs only inside an
+/// initiated recording.
+pub(crate) fn scanning_now(app: &AppHandle) -> bool {
+    app.state::<ScanRuntime>()
+        .state
+        .lock()
+        .map(|state| state.scanning)
+        .unwrap_or(false)
+}
+
+/// 30 s dwell heartbeat tied to a scan generation (ports the heartbeat
+/// half of the timeline fast lane).
+async fn heartbeat_loop(app: AppHandle, generation: u64) {
+    loop {
+        {
+            let runtime: State<ScanRuntime> = app.state::<ScanRuntime>();
+            let mut rx = runtime.cancel.subscribe();
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+                _ = rx.changed() => {
+                    if !is_current(&app, generation) {
+                        return;
+                    }
+                }
+            }
+        }
+        if !is_current(&app, generation) {
+            return;
+        }
+        crate::timeline::record_heartbeat(&app);
+    }
 }
 
 fn manual_scan_args(app: &AppHandle, root: &std::path::Path) -> Result<(PathBuf, Vec<String>), String> {
@@ -371,6 +471,9 @@ async fn run_manual_scan(
     let root = crate::bridge::data_root().ok()?;
     let (cli, args) = manual_scan_args(app, &root).ok()?;
 
+    // Serialize model loads: no two inference processes at once.
+    let model_state: State<ScanRuntime> = app.state();
+    let _model = model_state.model_lock.lock().await;
     let child = tokio::process::Command::new(&cli)
         .args(&args)
         .stdout(std::process::Stdio::piped())
@@ -434,10 +537,24 @@ async fn scan_loop(app: AppHandle, generation: u64) {
         if !is_current(&app, generation) {
             break;
         }
+        // Live tick announcement first: the frontend logs that a scan
+        // started immediately instead of waiting out capture + inference.
+        // Deliberately no window lookup here — the only window reads are
+        // the ones inside the user-initiated scan below; process/title
+        // fill in when its outcome arrives.
+        let tick_id = TICK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let started_at_ms = chrono::Utc::now().timestamp_millis();
+        let _ = app.emit(
+            "scan-tick-started",
+            serde_json::json!({
+                "tickId": tick_id,
+                "startedAtMs": started_at_ms,
+            }),
+        );
         match run_manual_scan(&app, generation).await {
             None => break, // paused or superseded
             Some(outcome) => {
-                let payload = outcome_payload(&outcome);
+                let payload = outcome_payload(&outcome, Some(tick_id));
                 let _ = app.emit("scan-outcome", &payload);
             }
         }
@@ -918,6 +1035,10 @@ pub fn glint_start_scanning(app: AppHandle) -> Result<serde_json::Value, String>
     tauri::async_runtime::spawn(async move {
         scan_loop(task_app, generation).await;
     });
+    let heartbeat_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        heartbeat_loop(heartbeat_app, generation).await;
+    });
     crate::refresh_tray(&app, true);
 
     Ok(serde_json::json!({
@@ -987,6 +1108,9 @@ pub async fn glint_capture_once(app: AppHandle) -> Result<serde_json::Value, Str
     }
     let root = crate::bridge::data_root()?;
     let (cli, args) = manual_scan_args(&app, &root)?;
+    // Serialize model loads: no two inference processes at once.
+    let model_state: State<ScanRuntime> = app.state();
+    let _model = model_state.model_lock.lock().await;
     let output = tokio::task::spawn_blocking(move || {
         std::process::Command::new(&cli).args(&args).output()
     })
@@ -1005,7 +1129,7 @@ pub async fn glint_capture_once(app: AppHandle) -> Result<serde_json::Value, Str
             })?;
     // Broadcast so every window (dashboard, command bar invocations)
     // applies the outcome like the scan loop does.
-    let payload = outcome_payload(&outcome);
+    let payload = outcome_payload(&outcome, None);
     let _ = app.emit("scan-outcome", &payload);
     Ok(payload)
 }
@@ -1023,4 +1147,240 @@ pub fn glint_open_search(app: AppHandle, query: Option<String>) -> Result<(), St
 pub fn glint_show_main(app: AppHandle) -> Result<(), String> {
     crate::show_main(&app);
     Ok(())
+}
+
+/// Ask the local agent over captured history (Agent tab).
+/// scope: "day" (needs `day` YYYY-MM-DD, default today), "week", "all".
+/// Built purely from existing verbs: runtime-status, manual-history,
+/// model-generate. Citations are the scans actually placed in context —
+/// never model-invented references.
+#[tauri::command]
+pub async fn glint_ask(
+    app: AppHandle,
+    question: String,
+    scope: String,
+    day: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let question = question.trim().to_string();
+    if question.is_empty() {
+        return Err("Ask a question about your captured context.".to_string());
+    }
+
+    // 1. Resolve the LiteRT runtime (paths for model-generate).
+    let resolution = crate::bridge::run_sidecar(&app, &["runtime-status"])
+        .map_err(|e| format!("Gemma runtime check failed: {e}"))?
+        .json;
+    let (ready_summary, ready) = runtime_port(&resolution);
+    if !ready {
+        return Err(ready_summary);
+    }
+    let python = resolution
+        .get("pythonExecutable")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let worker = resolution
+        .get("workerScript")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let model = resolution
+        .get("modelPath")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // 2. Pull scan records and filter by scope.
+    let root = crate::bridge::data_root()?;
+    let db_args = crate::bridge::db_args(&app, &root);
+    let mut args = vec!["manual-history", "--limit", "500"];
+    args.extend(db_args.iter().map(|s| s.as_str()));
+    let scans = crate::bridge::run_sidecar(&app, &args)
+        .map(|out| {
+            out.json
+                .get("scans")
+                .cloned()
+                .unwrap_or(serde_json::Value::Array(vec![]))
+        })
+        .unwrap_or(serde_json::Value::Array(vec![]));
+    let all_scans: Vec<&serde_json::Value> = scans.as_array().map(|a| a.iter().collect()).unwrap_or_default();
+
+    let day_key = day
+        .filter(|d| !d.trim().is_empty())
+        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
+    let local_day_of = |ms: i64| -> String {
+        chrono::DateTime::from_timestamp_millis(ms)
+            .map(|utc| {
+                chrono::Local
+                    .from_utc_datetime(&utc.naive_utc())
+                    .format("%Y-%m-%d")
+                    .to_string()
+            })
+            .unwrap_or_default()
+    };
+    let in_scope = |scan: &serde_json::Value| -> bool {
+        let ms = scan
+            .get("capturedAtMilliseconds")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        match scope.as_str() {
+            "week" => {
+                let today = chrono::Local::now().date_naive();
+                chrono::NaiveDate::parse_from_str(&local_day_of(ms), "%Y-%m-%d")
+                    .map(|d| (0..=6).contains(&(today - d).num_days()))
+                    .unwrap_or(false)
+            }
+            "all" => true,
+            _ => local_day_of(ms) == day_key,
+        }
+    };
+    let scoped: Vec<&serde_json::Value> =
+        all_scans.iter().filter(|s| in_scope(s)).copied().collect();
+    if scoped.is_empty() {
+        return Ok(serde_json::json!({
+            "answer": "I couldn't find enough evidence in the selected scope. Try a wider scope or different wording.",
+            "citations": [],
+            "scopedCount": 0,
+            "totalCount": all_scans.len(),
+        }));
+    }
+
+    // 3. Build a budgeted context (labels + summaries + signals only —
+    // never full redacted dumps), newest first. Hard cap ~3.5k chars: the
+    // worker rejects inputs past ~1.9k tokens within milliseconds, and
+    // token-dense content needs the margin. Deterministic pass > retry.
+    const CONTEXT_BUDGET: usize = 3_500;
+    let mut context = String::new();
+    let mut cited = Vec::new();
+    for (index, scan) in scoped.iter().enumerate() {
+        let label = scan.get("label").and_then(|v| v.as_str()).unwrap_or("Untitled");
+        let summary = scan.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+        let process = scan.get("processName").and_then(|v| v.as_str()).unwrap_or("?");
+        let ts = scan.get("capturedAtMilliseconds").and_then(|v| v.as_i64()).unwrap_or(0);
+        let important = scan.get("importantSignals").and_then(|v| v.as_str()).unwrap_or("");
+        let reminder = scan.get("reminderCandidate").and_then(|v| v.as_str()).unwrap_or("");
+        let entry = format!(
+            "[{index}] {label} ({process}, {ts})\n{summary}\nImportant: {important}\nReminder: {reminder}\n"
+        );
+        if context.len() + entry.len() > CONTEXT_BUDGET {
+            break;
+        }
+        context.push_str(&entry);
+        cited.push(serde_json::json!({
+            "id": scan.get("id"),
+            "label": label,
+            "capturedAtMilliseconds": ts,
+            "processName": process,
+        }));
+    }
+
+    let prompt = format!(
+        "Answer the user's question using ONLY the captured context below. \
+         Reference sources like [0], [1] where they support the answer. \
+         If the context lacks evidence, say so plainly instead of inventing \
+         an answer. Format the answer as one short paragraph followed by a \
+         'Summary:' line and 3-6 dash-led bullet points (- ...) capturing \
+         the key facts.\n\nQuestion: {question}\n\nCaptured context:\n{context}"
+    );
+
+    // 4. Generate via the existing model-generate verb (5 min cap inside).
+    // Serialized with scan ticks (one model load at a time) and retried
+    // once: native worker failures are usually transient (RAM contention
+    // from an overlapping load, AV holds, cold-start races).
+    let model_state: State<ScanRuntime> = app.state();
+    let _model = model_state.model_lock.lock().await;
+    let mut last_error = "The local model produced no output.".to_string();
+    let mut generated: Option<serde_json::Value> = None;
+    for _ in 0..2 {
+        let args = vec![
+            "model-generate".to_string(),
+            "--python".to_string(),
+            python.clone(),
+            "--worker".to_string(),
+            worker.clone(),
+            "--model".to_string(),
+            model.clone(),
+            "--backend".to_string(),
+            "cpu".to_string(),
+            "--prompt".to_string(),
+            prompt.clone(),
+        ];
+        let blocking_app = app.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            let cli = crate::bridge::sidecar_path(&blocking_app)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
+            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            std::process::Command::new(&cli).args(&arg_refs).output()
+        })
+        .await
+        .map_err(|error| format!("Agent task failed: {error}"))?
+        .map_err(|error| format!("Agent failed to launch: {error}"))?;
+        match serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&output.stdout)) {
+            Ok(value) => {
+                generated = Some(value);
+                break;
+            }
+            Err(_) => {
+                last_error = friendly_model_error(&String::from_utf8_lossy(&output.stderr));
+            }
+        }
+    }
+    let generated = generated.ok_or_else(|| {
+        log_ask_failure(&question, prompt.len(), scoped.len(), &last_error);
+        last_error
+    })?;
+    let answer = generated
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if answer.is_empty() {
+        return Err("The local model produced no answer.".to_string());
+    }
+    Ok(serde_json::json!({
+        "answer": answer,
+        "citations": cited,
+        "scopedCount": scoped.len(),
+        "totalCount": all_scans.len(),
+    }))
+}
+
+/// Global shortcut registration state (never silent on conflict: the
+/// Diagnostics page lists any combo the OS refused).
+#[tauri::command]
+pub fn glint_shortcut_status(app: AppHandle) -> Result<serde_json::Value, String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let shortcuts = app.global_shortcut();
+    let items = [
+        ("ctrl+alt+g", "Open command bar"),
+        ("ctrl+alt+s", "Start scanning"),
+        ("ctrl+alt+p", "Pause scanning"),
+    ]
+    .into_iter()
+    .map(|(shortcut, action)| {
+        let registered = shortcuts.is_registered(shortcut);
+        serde_json::json!({
+            "shortcut": shortcut,
+            "action": action,
+            "registered": registered,
+        })
+    })
+    .collect::<Vec<_>>();
+    Ok(serde_json::Value::Array(items))
+}
+
+/// Timeline fast-lane read: sealed day file for `date` (YYYY-MM-DD,
+/// default today) → hook-exact + heartbeat rows, oldest first.
+#[tauri::command]
+pub fn glint_timeline(app: AppHandle, date: Option<String>) -> Result<serde_json::Value, String> {
+    let day = date
+        .filter(|d| !d.trim().is_empty())
+        .unwrap_or_else(crate::timeline::local_day);
+    let events = crate::timeline::load_day(&app, &day)?;
+    Ok(serde_json::json!({
+        "date": day,
+        "events": events,
+        "droppedHooks": crate::timeline::dropped_count(),
+    }))
 }

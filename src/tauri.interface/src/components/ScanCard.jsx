@@ -1,4 +1,29 @@
-import { scanView, searchView } from "../glint";
+import { formatTimestamp, scanView, searchView } from "../glint";
+
+/**
+ * Live placeholder logged the moment a scan tick starts on a window.
+ * Replaced by the real ScanCard when the tick's outcome arrives.
+ */
+export function PendingScanCard({ tick }) {
+  const source =
+    tick.process && tick.title
+      ? `${tick.process} | ${tick.title}`
+      : (tick.process ?? tick.title ?? "Current window");
+  return (
+    <div className="scan-card pending">
+      <div className="scan-time">{formatTimestamp(tick.startedAtMs)}</div>
+      <div className="scan-live-row">
+        <span className="live-dot" aria-hidden="true" />
+        <span className="scan-label">Capturing {tick.process ?? "current window"}…</span>
+      </div>
+      <div className="scan-summary">
+        Reading on-screen activity now — the summary lands here when local
+        inference finishes.
+      </div>
+      <div className="scan-source">{source}</div>
+    </div>
+  );
+}
 
 /**
  * Ports the WinUI scan-history item template (and the search-result

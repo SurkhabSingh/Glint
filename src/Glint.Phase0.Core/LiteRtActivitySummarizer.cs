@@ -2,11 +2,14 @@ namespace Glint.Phase0.Core;
 
 public sealed class LiteRtActivitySummarizer : IActivitySummarizer
 {
-    public const int DefaultContextCharacters = 16_000;
+    // Budgets verified against the worker's fast input cliff (~7-8k total
+    // prompt chars on gemma-4-e2b): instruction overhead (~1.5-2k) plus the
+    // top rung must stay clearly below it, even for token-dense content.
+    public const int DefaultContextCharacters = 4_000;
 
     private const int HeadContextCharacters = 2_000;
     private const string OmittedContextMarker = "\n...[middle context omitted]...\n";
-    private static readonly int[] ContextBudgets = [16_000, 8_000, 4_000, 2_000];
+    private static readonly int[] ContextBudgets = [4_000, 2_000, 1_000];
     private readonly ILiteRtGenerator _client;
 
     public LiteRtActivitySummarizer(

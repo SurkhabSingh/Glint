@@ -61,6 +61,20 @@ public sealed class LiteRtWorkerClient : ILiteRtGenerator
             throw new ArgumentException("Prompt cannot be empty.", nameof(request));
         }
 
+        // Fast-fail inputs the native runtime rejects outright (observed:
+        // send_message fails within milliseconds past ~1.9k input tokens on
+        // gemma-4-e2b, regardless of max-tokens). A clear error beats native
+        // gibberish and, for the summarizer, cascades to the next smaller
+        // context budget instead of burning a full worker spawn.
+        var estimatedInputTokens =
+            (request.Prompt.Length + (request.SystemPrompt?.Length ?? 0)) / 4;
+        if (estimatedInputTokens > 1_600)
+        {
+            throw new InvalidOperationException(
+                $"Prompt too large for the local worker: ~{estimatedInputTokens} estimated " +
+                $"input tokens exceed the ~1,600-token budget. Shrink context and retry.");
+        }
+
         var start = new ProcessStartInfo
         {
             FileName = _pythonExecutable,
