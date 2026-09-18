@@ -32,7 +32,7 @@ export function PendingScanCard({ tick }) {
  * Pass `search` (a ContextSearchResult) instead of `scan` for the
  * search-page variant, which shows the FTS snippet instead of metrics.
  */
-function ScanCard({ scan, search }) {
+function ScanCard({ scan, search, session }) {
   if (search) {
     const view = searchView(search);
     return (
@@ -52,12 +52,25 @@ function ScanCard({ scan, search }) {
   const hasDiagnostics = (view.inputText ?? "").trim().length > 0;
   const hasOcr = (view.ocrText ?? "").trim().length > 0;
   const hasUia = (view.uiaText ?? "").trim().length > 0;
+  // A grouped card promises its summary is on the session above: only say
+  // that when the session's summary is actually rendered there. Otherwise
+  // say what is true (pending, too minor to summarize, or unknown state).
+  const grouped = Boolean(scan.sessionId);
+  const summaryText = !grouped
+    ? view.summary
+    : session?.summary
+      ? view.summary
+      : session?.isMinor
+        ? "Too little on screen to summarize."
+        : session
+          ? "Grouped into a session — summary pending."
+          : "Grouped into a session.";
 
   return (
     <div className="scan-card">
       <div className="scan-time">{view.timestamp}</div>
       <div className="scan-label">{view.label}</div>
-      <div className="scan-summary">{view.summary}</div>
+      <div className="scan-summary">{summaryText}</div>
       {view.important && <div className="scan-important">{view.important}</div>}
       {view.reminder && <div className="scan-reminder">{view.reminder}</div>}
       <div className="scan-source">{view.source}</div>

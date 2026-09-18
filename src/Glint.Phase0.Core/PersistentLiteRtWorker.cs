@@ -76,6 +76,13 @@ public sealed class PersistentLiteRtWorker : ILiteRtGenerator, IDisposable
         ValidateFiles();
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        // Cross-process: never load the model while another Glint process
+        // holds it. Uses the caller's timeout as the maximum wait so a
+        // contended run fails with a clear message instead of two overlapping
+        // native loads failing each other opaquely.
+        using var modelGate = await LiteRtWorkerProtocol.LiteRtModelGate
+            .AcquireAsync(timeout, cancellationToken)
+            .ConfigureAwait(false);
         try
         {
             PauseIdleTimer();
@@ -104,12 +111,12 @@ public sealed class PersistentLiteRtWorker : ILiteRtGenerator, IDisposable
                     .ConfigureAwait(false);
                 await process.StandardInput.FlushAsync(timeoutSource.Token).ConfigureAwait(false);
 
-                var response = await ReadResponseAsync(process, id, timeoutSource.Token)
+                var (response, rawLine) = await ReadResponseAsync(process, id, timeoutSource.Token)
                     .ConfigureAwait(false);
                 if (!response.Ok)
                 {
                     throw new InvalidOperationException(
-                        response.Error ?? "LiteRT-LM worker reported an unknown error.");
+                        ReportFailure(id, response.Error, rawLine));
                 }
 
                 processTimer.Stop();
@@ -147,6 +154,9 @@ public sealed class PersistentLiteRtWorker : ILiteRtGenerator, IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ValidateFiles();
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var modelGate = await LiteRtWorkerProtocol.LiteRtModelGate
+            .AcquireAsync(timeout, cancellationToken)
+            .ConfigureAwait(false);
         try
         {
             PauseIdleTimer();
@@ -164,7 +174,7 @@ public sealed class PersistentLiteRtWorker : ILiteRtGenerator, IDisposable
                     .WriteLineAsync(payload.AsMemory(), timeoutSource.Token)
                     .ConfigureAwait(false);
                 await process.StandardInput.FlushAsync(timeoutSource.Token).ConfigureAwait(false);
-                var response = await ReadResponseAsync(process, id, timeoutSource.Token)
+                var (response, _) = await ReadResponseAsync(process, id, timeoutSource.Token)
                     .ConfigureAwait(false);
                 return response.Ok;
             }
@@ -244,11 +254,18 @@ public sealed class PersistentLiteRtWorker : ILiteRtGenerator, IDisposable
         return process;
     }
 
-    private async Task<WorkerResponse> ReadResponseAsync(
+    private async Task<(WorkerResponse Response, string RawLine)> ReadResponseAsync(
         Process process,
         long expectedId,
         CancellationToken cancellationToken)
     {
+        // Native code can print its own JSON status lines to stdout
+        // mid-generation. Those are noise: skip them (bounded) rather than
+        // mistake one for a failed answer, which used to surface as the
+        // bare "reported an unknown error" and kill a healthy worker.
+        // Unparseable lines are still protocol errors, so a truly corrupt
+        // stream fails fast instead of hanging until the timeout.
+        var skippedNoise = 0;
         while (true)
         {
             var line = await process.StandardOutput.ReadLineAsync(cancellationToken)
@@ -264,8 +281,37 @@ public sealed class PersistentLiteRtWorker : ILiteRtGenerator, IDisposable
                 continue;
             }
 
-            var response = JsonSerializer.Deserialize<WorkerResponse>(line, JsonOptions)
-                ?? throw new InvalidDataException("LiteRT-LM worker returned no JSON response.");
+            if (LiteRtWorkerProtocol.IsNoise(line))
+            {
+                skippedNoise++;
+                if (skippedNoise > 100)
+                {
+                    throw new InvalidDataException(
+                        $"LiteRT-LM worker never answered request {expectedId}: "
+                        + "stdout carried only log noise. "
+                        + StderrTail());
+                }
+
+                continue;
+            }
+
+            WorkerResponse? response;
+            try
+            {
+                response = JsonSerializer.Deserialize<WorkerResponse>(line, JsonOptions);
+            }
+            catch (JsonException error)
+            {
+                throw new InvalidDataException(
+                    $"LiteRT-LM worker returned a malformed response to request {expectedId}: "
+                    + $"{LiteRtWorkerProtocol.Preview(line)}. {StderrTail()}".Trim(),
+                    error);
+            }
+
+            if (response is null)
+            {
+                throw new InvalidDataException("LiteRT-LM worker returned no JSON response.");
+            }
 
             // A mismatched id means the stream is out of step; the caller
             // kills the worker rather than trust a stale answer.
@@ -275,8 +321,20 @@ public sealed class PersistentLiteRtWorker : ILiteRtGenerator, IDisposable
                     $"LiteRT-LM worker answered request {id}, expected {expectedId}.");
             }
 
-            return response;
+            return (response, line);
         }
+    }
+
+    /// Failure text always carries the worker's stderr tail and never relies
+    /// on the error field being present, so "an unknown error" with no detail
+    /// can no longer reach the user. The "reported" wording is load-bearing:
+    /// the summarizer retries messages containing it.
+    private string ReportFailure(long requestId, string? error, string rawLine)
+    {
+        var detail = string.IsNullOrWhiteSpace(error)
+            ? $"no error detail; raw response: {LiteRtWorkerProtocol.Preview(rawLine)}"
+            : error.Trim();
+        return $"LiteRT-LM worker reported a failure for request {requestId}: {detail} {StderrTail()}".Trim();
     }
 
     private async Task DrainStderrAsync(Process process)

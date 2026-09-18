@@ -11,7 +11,7 @@ public interface ICaptureEventStore
     void Insert(RawCaptureEvent captureEvent);
 }
 
-    public sealed class Phase0Database : ICaptureEventStore, IManualScanStore, ISessionWorkStore, IDisposable
+    public sealed class Phase0Database : ICaptureEventStore, IManualScanStore, ISessionWorkStore, IChatStore, IDisposable
 {
     private static readonly Lock InitializationLock = new();
     private static bool _sqliteInitialized;
@@ -412,6 +412,202 @@ public interface ICaptureEventStore
         command.Parameters.AddWithValue("$id", sessionId);
         command.ExecuteNonQuery();
     }
+
+    /// <summary>
+    /// Agent chat history. Threads order by last activity so the panel reads
+    /// like any messenger: the active conversation stays on top. Message text
+    /// lives only here, inside the encrypted store.
+    /// </summary>
+    public ChatThread CreateChatThread(string title, string scope, long atMilliseconds)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(title);
+        var thread = new ChatThread(
+            Guid.NewGuid().ToString("N"),
+            title.Trim(),
+            string.IsNullOrWhiteSpace(scope) ? "all" : scope.Trim(),
+            atMilliseconds,
+            atMilliseconds);
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            INSERT INTO chat_threads (id, title, scope, created_at_ms, updated_at_ms)
+            VALUES ($id, $title, $scope, $at, $at);
+            """;
+        command.Parameters.AddWithValue("$id", thread.Id);
+        command.Parameters.AddWithValue("$title", thread.Title);
+        command.Parameters.AddWithValue("$scope", thread.Scope);
+        command.Parameters.AddWithValue("$at", atMilliseconds);
+        command.ExecuteNonQuery();
+        return thread;
+    }
+
+    public IReadOnlyList<ChatThread> GetRecentChatThreads(int limit = 50)
+    {
+        if (limit is < 1 or > 500)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, title, scope, created_at_ms, updated_at_ms
+            FROM chat_threads
+            ORDER BY updated_at_ms DESC, id DESC
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$limit", limit);
+        using var reader = command.ExecuteReader();
+        var threads = new List<ChatThread>();
+        while (reader.Read())
+        {
+            threads.Add(ReadChatThread(reader));
+        }
+
+        return threads;
+    }
+
+    public ChatThread? GetChatThread(string id)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, title, scope, created_at_ms, updated_at_ms
+            FROM chat_threads
+            WHERE id = $id;
+            """;
+        command.Parameters.AddWithValue("$id", id);
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? ReadChatThread(reader) : null;
+    }
+
+    public void RenameChatThread(string id, string title, long atMilliseconds)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(title);
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            UPDATE chat_threads
+            SET title = $title,
+                updated_at_ms = $at
+            WHERE id = $id;
+            """;
+        command.Parameters.AddWithValue("$title", title.Trim());
+        command.Parameters.AddWithValue("$at", atMilliseconds);
+        command.Parameters.AddWithValue("$id", id);
+        command.ExecuteNonQuery();
+    }
+
+    public void DeleteChatThread(string id)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText = "DELETE FROM chat_threads WHERE id = $id;";
+        command.Parameters.AddWithValue("$id", id);
+        command.ExecuteNonQuery();
+    }
+
+    public ChatMessage AppendChatMessage(
+        string threadId,
+        string role,
+        string text,
+        string citationsJson,
+        int scopedCount,
+        long atMilliseconds)
+    {
+        if (!ChatRoles.IsValid(role))
+        {
+            throw new ArgumentException(
+                $"role must be one of: {ChatRoles.User}, {ChatRoles.Agent}, {ChatRoles.Error}.",
+                nameof(role));
+        }
+
+        ArgumentNullException.ThrowIfNull(text);
+        var message = new ChatMessage(
+            Guid.NewGuid().ToString("N"),
+            threadId,
+            role,
+            text,
+            string.IsNullOrWhiteSpace(citationsJson) ? "[]" : citationsJson,
+            Math.Max(0, scopedCount),
+            atMilliseconds);
+        using var transaction = _connection.BeginTransaction();
+        using (var command = _connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText =
+                """
+                INSERT INTO chat_messages
+                    (id, thread_id, role, text, citations_json, scoped_count, created_at_ms)
+                VALUES
+                    ($id, $thread, $role, $text, $citations, $scoped, $at);
+                """;
+            command.Parameters.AddWithValue("$id", message.Id);
+            command.Parameters.AddWithValue("$thread", threadId);
+            command.Parameters.AddWithValue("$role", role);
+            command.Parameters.AddWithValue("$text", text);
+            command.Parameters.AddWithValue("$citations", message.CitationsJson);
+            command.Parameters.AddWithValue("$scoped", message.ScopedCount);
+            command.Parameters.AddWithValue("$at", atMilliseconds);
+            command.ExecuteNonQuery();
+        }
+
+        // The thread sorts by last activity, so every message bumps it.
+        using (var command = _connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText =
+                "UPDATE chat_threads SET updated_at_ms = $at WHERE id = $id;";
+            command.Parameters.AddWithValue("$at", atMilliseconds);
+            command.Parameters.AddWithValue("$id", threadId);
+            command.ExecuteNonQuery();
+        }
+
+        transaction.Commit();
+        return message;
+    }
+
+    public IReadOnlyList<ChatMessage> GetChatMessages(string threadId, int limit = 200)
+    {
+        if (limit is < 1 or > 2_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, thread_id, role, text, citations_json, scoped_count, created_at_ms
+            FROM chat_messages
+            WHERE thread_id = $thread
+            ORDER BY created_at_ms ASC, id ASC
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$thread", threadId);
+        command.Parameters.AddWithValue("$limit", limit);
+        using var reader = command.ExecuteReader();
+        var messages = new List<ChatMessage>();
+        while (reader.Read())
+        {
+            messages.Add(new(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.IsDBNull(4) ? "[]" : reader.GetString(4),
+                reader.IsDBNull(5) ? 0 : checked((int)reader.GetInt64(5)),
+                reader.GetInt64(6)));
+        }
+
+        return messages;
+    }
+
+    private static ChatThread ReadChatThread(System.Data.Common.DbDataReader reader) =>
+        new(
+            reader.GetString(0),
+            reader.GetString(1),
+            reader.IsDBNull(2) ? "all" : reader.GetString(2),
+            reader.GetInt64(3),
+            reader.GetInt64(4));
 
     /// Markers within a window, oldest first.
     public IReadOnlyList<ActivityMarker> GetMarkers(
@@ -1135,6 +1331,33 @@ public interface ICaptureEventStore
 
             INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
             VALUES (9, CAST(unixepoch('subsec') * 1000 AS INTEGER));
+
+            CREATE TABLE IF NOT EXISTS chat_threads (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                scope TEXT NOT NULL DEFAULT 'all',
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            ) STRICT;
+
+            CREATE INDEX IF NOT EXISTS idx_chat_threads_updated_at
+            ON chat_threads(updated_at_ms DESC);
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+                role TEXT NOT NULL CHECK(role IN ('user', 'agent', 'error')),
+                text TEXT NOT NULL,
+                citations_json TEXT NOT NULL DEFAULT '[]',
+                scoped_count INTEGER NOT NULL DEFAULT 0,
+                created_at_ms INTEGER NOT NULL
+            ) STRICT;
+
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_thread
+            ON chat_messages(thread_id, created_at_ms);
+
+            INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
+            VALUES (10, CAST(unixepoch('subsec') * 1000 AS INTEGER));
             """);
     }
 

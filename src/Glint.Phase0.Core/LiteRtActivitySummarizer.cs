@@ -256,6 +256,16 @@ public sealed class LiteRtActivitySummarizer : IActivitySummarizer
 
     private static bool IsRetryableGenerationError(Exception error)
     {
+        // An empty generation is usually transient: retry it against a smaller
+        // context rather than failing the session outright.
+        if (error is InvalidDataException dataError
+            && dataError.Message.Contains(
+                "empty summary",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
         if (error is not InvalidOperationException)
         {
             return false;

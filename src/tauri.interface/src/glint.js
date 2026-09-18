@@ -21,8 +21,19 @@ export const glintSetupRuntime = () => invoke("glint_setup_runtime");
 export const glintTimeline = (date = null) =>
   invoke("glint_timeline", { date });
 export const glintShortcutStatus = () => invoke("glint_shortcut_status");
-export const glintAsk = (question, scope, day = null) =>
-  invoke("glint_ask", { question, scope, day });
+export const glintAsk = (question, scope, day = null, threadId = null) =>
+  invoke("glint_ask", { question, scope, day, threadId });
+export const glintChatThreads = (limit = 50) =>
+  invoke("glint_chat_threads", { limit });
+export const glintChatThread = (id, limit = 200) =>
+  invoke("glint_chat_thread", { id, limit });
+export const glintChatCreate = (title, scope = null) =>
+  invoke("glint_chat_create", { title, scope });
+export const glintChatRename = (id, title) =>
+  invoke("glint_chat_rename", { id, title });
+export const glintChatDelete = (id) => invoke("glint_chat_delete", { id });
+export const glintChatAppend = (thread, role, text, citations = null, scoped = null) =>
+  invoke("glint_chat_append", { thread, role, text, citations, scoped });
 
 /** Clock time with milliseconds: "7:34:13.043 PM" (accountability rows). */
 export function formatClock(ms) {
@@ -128,7 +139,7 @@ export function sessionView(session) {
       ? session.summary
       : minor
         ? "Too little on screen to summarize."
-        : "Not summarized yet — this runs between captures.",
+        : "Not summarized yet — summaries run when scanning stops.",
     important: meaningful(session.importantSignals),
     reminder: meaningful(session.reminderCandidate),
     source: session.processName,

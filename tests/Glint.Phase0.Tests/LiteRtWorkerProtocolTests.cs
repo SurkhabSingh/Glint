@@ -31,6 +31,58 @@ public sealed class LiteRtWorkerProtocolTests
         Assert.False(LiteRtWorkerProtocol.IsNotification(line));
     }
 
+    [Theory]
+    [InlineData("""{"id":1,"ok":true,"text":"Ok","elapsedMilliseconds":344.8}""")]
+    [InlineData("""{"id":1,"ok":false,"error":"RuntimeError: boom","elapsedMilliseconds":21.5}""")]
+    [InlineData("""{"id":2,"ok":true,"op":"ping","elapsedMilliseconds":0.01}""")]
+    public void ResponseLinesAreRecognizedAsResponses(string line)
+    {
+        Assert.True(LiteRtWorkerProtocol.IsResponse(line));
+        Assert.False(LiteRtWorkerProtocol.IsNoise(line));
+    }
+
+    [Theory]
+    [InlineData("""{"event":"ready","loadMs":197.7,"pid":1234,"maxNumTokens":4096}""")]
+    [InlineData("not json at all")]
+    [InlineData("")]
+    [InlineData("[1,2,3]")]
+    [InlineData("""{"level":"info","message":"loading shard 1/2"}""")]
+    public void NonResponseLinesAreNotMistakenForResponses(string line)
+    {
+        Assert.False(LiteRtWorkerProtocol.IsResponse(line));
+    }
+
+    [Theory]
+    [InlineData("""{"level":"info","message":"loading shard 1/2"}""")]
+    [InlineData("""{"status":"ok"}""")]
+    public void NativeJsonStatusLinesAreNoiseToBeSkipped(string line)
+    {
+        // A stray stdout line without "ok" must never deserialize into a
+        // phantom Ok=false/Error=null failure ("an unknown error").
+        Assert.True(LiteRtWorkerProtocol.IsNoise(line));
+        Assert.False(LiteRtWorkerProtocol.IsNotification(line));
+    }
+
+    [Theory]
+    [InlineData("not json at all")]
+    [InlineData("")]
+    [InlineData("[1,2,3]")]
+    public void UnparseableLinesAreNotNoise(string line)
+    {
+        // Corrupt bytes stay protocol errors so a broken stream fails fast
+        // instead of hanging until the timeout.
+        Assert.False(LiteRtWorkerProtocol.IsNoise(line));
+    }
+
+    [Fact]
+    public void PreviewsAreBoundedAndNeverNull()
+    {
+        Assert.Equal("<empty>", LiteRtWorkerProtocol.Preview(null));
+        Assert.Equal("<empty>", LiteRtWorkerProtocol.Preview(""));
+        Assert.Equal("abc", LiteRtWorkerProtocol.Preview("abc"));
+        Assert.EndsWith("...", LiteRtWorkerProtocol.Preview(new string('x', 500)));
+    }
+
     [Fact]
     public void EmptyPromptsAreRejectedBeforeSpawningAWorker()
     {

@@ -551,6 +551,16 @@ fn handle_switch(app: &AppHandle, hwnd: isize) {
     push_row(app, row);
 }
 
+/// In-app navigation inside one OS window (Discord server hop, browser tab,
+/// document switch): the foreground hook never fires because the HWND does
+/// not change, so the scan loop calls this once the new title has settled.
+/// Reuses the focus pipeline, so privacy probing, flicker collapsing, and
+/// heartbeat title reuse all behave exactly like a real switch. Must run off
+/// the async runtime (it spawns the probe sidecar synchronously).
+pub fn record_retitle(app: &AppHandle, hwnd: isize) {
+    handle_switch(app, hwnd);
+}
+
 /// The title a heartbeat may record: the one from the most recent
 /// `window.focused` row for the same process, which already passed the
 /// privacy gate. Returns None when that row is for another process or had

@@ -57,6 +57,14 @@ public sealed class LiteRtWorkerClient : ILiteRtGenerator
         ValidateFiles();
         LiteRtWorkerProtocol.ValidateRequest(request);
 
+        // Cross-process: never load the model while another Glint process
+        // holds it (see LiteRtModelGate). A contended one-shot fails fast
+        // with a clear message instead of two overlapping native loads
+        // failing each other opaquely.
+        using var modelGate = await LiteRtWorkerProtocol.LiteRtModelGate
+            .AcquireAsync(timeout, cancellationToken)
+            .ConfigureAwait(false);
+
         var start = new ProcessStartInfo
         {
             FileName = _pythonExecutable,
@@ -91,8 +99,12 @@ public sealed class LiteRtWorkerClient : ILiteRtGenerator
             process.StandardInput.Close();
 
             // The worker announces itself before serving anything, so skip
-            // notices until the response for this request arrives.
+            // notices until the response for this request arrives. Native
+            // JSON status lines on stdout are noise, not answers: skip those
+            // too, or one deserializes as Ok=false/Error=null and surfaces
+            // as the bare "reported an unknown error".
             string? responseLine = null;
+            var skippedNoise = 0;
             while (true)
             {
                 var line = await process.StandardOutput.ReadLineAsync(timeoutSource.Token)
@@ -104,6 +116,17 @@ public sealed class LiteRtWorkerClient : ILiteRtGenerator
 
                 if (LiteRtWorkerProtocol.IsNotification(line))
                 {
+                    continue;
+                }
+
+                if (LiteRtWorkerProtocol.IsNoise(line))
+                {
+                    skippedNoise++;
+                    if (skippedNoise > 100)
+                    {
+                        break;
+                    }
+
                     continue;
                 }
 
@@ -119,18 +142,35 @@ public sealed class LiteRtWorkerClient : ILiteRtGenerator
                     $"LiteRT-LM worker exited {process.ExitCode}: {error.Trim()}");
             }
 
-            var response = responseLine is null
-                ? null
-                : JsonSerializer.Deserialize<WorkerResponse>(responseLine, JsonOptions);
+            WorkerResponse? response;
+            try
+            {
+                response = responseLine is null
+                    ? null
+                    : JsonSerializer.Deserialize<WorkerResponse>(responseLine, JsonOptions);
+            }
+            catch (JsonException jsonError)
+            {
+                throw new InvalidDataException(
+                    "LiteRT-LM worker returned a malformed response: "
+                    + $"{LiteRtWorkerProtocol.Preview(responseLine)}. {Tail(error)}".Trim(),
+                    jsonError);
+            }
+
             if (response is null)
             {
-                throw new InvalidDataException("LiteRT-LM worker returned no JSON response.");
+                throw new InvalidDataException(
+                    "LiteRT-LM worker returned no JSON response. "
+                    + Tail(error).Trim());
             }
 
             if (!response.Ok)
             {
+                var detail = string.IsNullOrWhiteSpace(response.Error)
+                    ? $"no error detail; raw response: {LiteRtWorkerProtocol.Preview(responseLine)}"
+                    : response.Error.Trim();
                 throw new InvalidOperationException(
-                    response.Error ?? "LiteRT-LM worker reported an unknown error.");
+                    $"LiteRT-LM worker reported a failure: {detail} {Tail(error)}".Trim());
             }
 
             processTimer.Stop();
@@ -148,6 +188,19 @@ public sealed class LiteRtWorkerClient : ILiteRtGenerator
 
             throw;
         }
+    }
+
+    private static string Tail(string error, int maxLength = 500)
+    {
+        var trimmed = error.Trim();
+        if (trimmed.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        return trimmed.Length <= maxLength
+            ? $"Worker output: {trimmed}"
+            : $"Worker output: ...{trimmed[^maxLength..]}";
     }
 
     private void ValidateFiles()

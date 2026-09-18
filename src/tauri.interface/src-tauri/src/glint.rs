@@ -365,11 +365,7 @@ fn outcome_payload(outcome: &serde_json::Value, tick_id: Option<u64>) -> serde_j
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
             let label = record.get("label").and_then(|v| v.as_str()).unwrap_or("");
-            let ms = record
-                .get("inferenceMilliseconds")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-            format!("{process}: {label} ({ms:.0} ms Gemma). Continuing to scan.")
+            format!("{process}: {label}. Captured; summary lands when scanning stops.")
         }
         "ModelFailed" | "DroppedSecretFrame" | "Failed" => {
             format!("{detail} Continuing to scan.")
@@ -381,7 +377,7 @@ fn outcome_payload(outcome: &serde_json::Value, tick_id: Option<u64>) -> serde_j
 
     let overall = match kind_name {
         "Completed" => overall_success(
-            "The window was scanned, summarized locally, and saved. Scanning remains active."
+            "The window was captured and saved. Its summary lands in the session when scanning stops."
                 .to_string(),
         ),
         "Unchanged" | "Suppressed" => overall_info(capture_summary.clone()),
@@ -500,6 +496,123 @@ pub fn glint_set_session_outcome(
     Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
 }
 
+/// Agent chat threads, most recently active first. Chat text lives only in
+/// the encrypted store; these verbs carry user content the same way `ask`
+/// does (sidecar argv, never metrics).
+#[tauri::command(async)]
+pub fn glint_chat_threads(app: AppHandle, limit: Option<u32>) -> Result<serde_json::Value, String> {
+    let root = crate::bridge::data_root()?;
+    let requested = limit.unwrap_or(50).clamp(1, 200).to_string();
+    let mut args = vec!["chat-threads".to_string(), "--limit".to_string(), requested];
+    args.extend(crate::bridge::db_args(&app, &root));
+    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
+    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+}
+
+/// One thread with its messages, oldest first.
+#[tauri::command(async)]
+pub fn glint_chat_thread(
+    app: AppHandle,
+    id: String,
+    limit: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let root = crate::bridge::data_root()?;
+    let requested = limit.unwrap_or(200).clamp(1, 2000).to_string();
+    let mut args = vec![
+        "chat-thread".to_string(),
+        "--id".to_string(),
+        id,
+        "--limit".to_string(),
+        requested,
+    ];
+    args.extend(crate::bridge::db_args(&app, &root));
+    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
+    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+}
+
+/// Start a thread. Titles come from the first question (truncated upstream),
+/// never model-generated, so opening a chat costs no inference.
+#[tauri::command(async)]
+pub fn glint_chat_create(
+    app: AppHandle,
+    title: String,
+    scope: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let root = crate::bridge::data_root()?;
+    let mut args = vec!["chat-create".to_string(), "--title".to_string(), title];
+    if let Some(scope) = scope {
+        args.push("--scope".to_string());
+        args.push(scope);
+    }
+    args.extend(crate::bridge::db_args(&app, &root));
+    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
+    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+}
+
+/// Rename a thread.
+#[tauri::command(async)]
+pub fn glint_chat_rename(
+    app: AppHandle,
+    id: String,
+    title: String,
+) -> Result<serde_json::Value, String> {
+    let root = crate::bridge::data_root()?;
+    let mut args = vec![
+        "chat-rename".to_string(),
+        "--id".to_string(),
+        id,
+        "--title".to_string(),
+        title,
+    ];
+    args.extend(crate::bridge::db_args(&app, &root));
+    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
+    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+}
+
+/// Delete a thread and its messages.
+#[tauri::command(async)]
+pub fn glint_chat_delete(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
+    let root = crate::bridge::data_root()?;
+    let mut args = vec!["chat-delete".to_string(), "--id".to_string(), id];
+    args.extend(crate::bridge::db_args(&app, &root));
+    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
+    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+}
+
+/// Append one message. Used by `glint_ask` to persist turns, and exposed for
+/// completeness; chat text never reaches metrics or logs.
+#[tauri::command(async)]
+pub fn glint_chat_append(
+    app: AppHandle,
+    thread: String,
+    role: String,
+    text: String,
+    citations: Option<String>,
+    scoped: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let root = crate::bridge::data_root()?;
+    let mut args = vec![
+        "chat-append".to_string(),
+        "--thread".to_string(),
+        thread,
+        "--role".to_string(),
+        role,
+        "--text".to_string(),
+        text,
+    ];
+    if let Some(citations) = citations {
+        args.push("--citations".to_string());
+        args.push(citations);
+    }
+    if let Some(scoped) = scoped {
+        args.push("--scoped".to_string());
+        args.push(scoped.to_string());
+    }
+    args.extend(crate::bridge::db_args(&app, &root));
+    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
+    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+}
+
 /// Sessions with their summaries, newest first.
 #[tauri::command(async)]
 pub fn glint_sessions(app: AppHandle, limit: Option<u32>) -> Result<serde_json::Value, String> {
@@ -525,12 +638,10 @@ fn record_marker(app: &AppHandle, kind: &'static str) {
     let _ = crate::bridge::run_sidecar(app, &arg_refs);
 }
 
-/// How often the loop groups captures into sessions and summarizes them.
-const SESSIONIZE_INTERVAL_MS: u64 = 60_000;
-
 /// Group captures into sessions and summarize the finished ones. Runs under
 /// the model lock because it makes model calls, so it never overlaps a scan.
-/// `seal_open` also closes the newest stretch, used when scanning stops.
+/// Called when a scan stops (`seal_open`), never mid-scan: captures stay
+/// model-free while recording so inference cannot contend with them.
 async fn run_sessionize(app: &AppHandle, seal_open: bool) -> Option<serde_json::Value> {
     let root = crate::bridge::data_root().ok()?;
     let cli = crate::bridge::sidecar_path(app).ok()?;
@@ -658,8 +769,13 @@ async fn scan_loop(app: AppHandle, generation: u64) {
     let mut last_scan: Option<Instant> = None;
     let mut last_foreground = cadence::foreground_handle();
     let mut foreground_changed_at: Option<Instant> = None;
+    // In-app navigation inside one OS window (Discord server hop, browser
+    // tab): the HWND never changes, so the foreground hook stays silent. A
+    // settled title change is treated like a switch — one timeline row plus
+    // one capture — once it has outlasted the switch debounce.
+    let mut last_title: Option<String> = None;
+    let mut pending_title: Option<(String, Instant)> = None;
     let mut away = false;
-    let mut last_sessionize = Instant::now();
 
     loop {
         if !is_current(&app, generation) {
@@ -670,6 +786,49 @@ async fn scan_loop(app: AppHandle, generation: u64) {
         if foreground != last_foreground {
             last_foreground = foreground;
             foreground_changed_at = Some(Instant::now());
+            // Baseline re-read silently on the next pass: the OS hook already
+            // logged this window, so there is nothing to report yet.
+            last_title = None;
+            pending_title = None;
+        } else {
+            // Same window: watch the title for settled in-app navigation.
+            // Empty reads carry no information and are ignored, so a
+            // transient failed read can never fake a hop; ticking titles
+            // (progress %, "typing…") never settle and produce nothing.
+            let title = cadence::foreground_title();
+            if title.is_empty() {
+                // No information; keep the previous state untouched.
+            } else if last_title.as_deref() == Some(title.as_str()) {
+                pending_title = None;
+            } else if last_title.is_none() {
+                last_title = Some(title);
+            } else {
+                let now = Instant::now();
+                let since = match &pending_title {
+                    Some((pending, at)) if *pending == title => *at,
+                    _ => {
+                        pending_title = Some((title.clone(), now));
+                        now
+                    }
+                };
+                if since.elapsed().as_millis() as u64 >= cadence::SWITCH_DEBOUNCE_MS {
+                    // Settled: log the hop and capture it like a switch,
+                    // backdating to when the title first appeared so the
+                    // capture fires on the next decision instead of waiting
+                    // out another debounce.
+                    last_title = Some(title);
+                    pending_title = None;
+                    foreground_changed_at = Some(since);
+                    let marker_app = app.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        crate::timeline::record_retitle(&marker_app, foreground)
+                    })
+                    .await;
+                    if !is_current(&app, generation) {
+                        break;
+                    }
+                }
+            }
         }
 
         let decision = cadence::decide(cadence::CaptureSignals {
@@ -736,18 +895,10 @@ async fn scan_loop(app: AppHandle, generation: u64) {
             }
         };
 
-        // Between captures, fold finished stretches into sessions and
-        // summarize them. Done here rather than after a capture so it never
-        // delays one, and under the model lock so it never overlaps one.
-        if last_sessionize.elapsed().as_millis() as u64 >= SESSIONIZE_INTERVAL_MS {
-            last_sessionize = Instant::now();
-            if let Some(result) = run_sessionize(&app, false).await {
-                let _ = app.emit("sessions-updated", &result);
-            }
-            if !is_current(&app, generation) {
-                break;
-            }
-        }
+        // Deliberately no sessionizing here: captures stay model-free while
+        // a scan is active, so inference never contends with capture for
+        // CPU/RAM mid-run. Grouping and summarizing happen once, when the
+        // scan stops (see the finalize block below).
 
         // Abortable wait, so a pause is noticed within one poll interval.
         {
@@ -764,14 +915,18 @@ async fn scan_loop(app: AppHandle, generation: u64) {
         }
     }
 
-    // Loop exit owns the final stopped state. The gate is the generation
-    // alone: stop clears `scanning` up front, so requiring it here would
-    // skip this block on exactly the path that needs it ( Pause → exit ).
-    // A superseded generation (newer Start) still skips via mismatch.
+    // Loop exit owns the final stopped state. Pause bumps the generation so
+    // in-flight work dies promptly, which means a paused loop is exactly one
+    // generation behind with scanning off — without the second clause below
+    // the seal-and-summarize-on-stop path would never run. A superseded
+    // generation (newer Start, scanning back on) still skips: the new loop
+    // owns the flow and its own stop will finalize.
     let should_finalize = {
         let runtime: State<ScanRuntime> = app.state::<ScanRuntime>();
         let mut state = runtime.state.lock().unwrap();
-        if state.generation == generation {
+        let paused =
+            state.generation == generation.wrapping_add(1) && !state.scanning;
+        if state.generation == generation || paused {
             state.scanning = false;
             true
         } else {
@@ -787,10 +942,26 @@ async fn scan_loop(app: AppHandle, generation: u64) {
         })
         .await;
 
-        // Nothing is in progress any more, so seal and summarize the last
-        // stretch too rather than leaving it ungrouped until the next run.
-        if let Some(result) = run_sessionize(&app, true).await {
-            let _ = app.emit("sessions-updated", &result);
+        // Nothing is being captured any more, so seal and summarize
+        // everything now: one stop must drain the whole backlog, because
+        // nothing sessionizes mid-scan any more. Rounds that summarize
+        // nothing make no progress (failures stay for a later stop), which
+        // bounds the loop; each round emits so the views fill in live.
+        for _ in 0..12 {
+            match run_sessionize(&app, true).await {
+                Some(result) => {
+                    let progressed = result
+                        .get("summarized")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                        > 0;
+                    let _ = app.emit("sessions-updated", &result);
+                    if !progressed {
+                        break;
+                    }
+                }
+                None => break,
+            }
         }
         let _ = app.emit(
             "scan-state",
@@ -1376,17 +1547,29 @@ pub fn glint_show_main(app: AppHandle) -> Result<(), String> {
 /// Built purely from existing verbs: runtime-status, manual-history,
 /// model-generate. Citations are the scans actually placed in context —
 /// never model-invented references.
+///
+/// `thread_id` threads the conversation: previous turns travel with the ask
+/// (so follow-ups and corrections land on the same evidence), and this ask's
+/// question + answer are appended to the thread. Follows-ups sample instead
+/// of running deterministically, or a correction could never change the
+/// answer. Thread failures are non-fatal: the ask proceeds unthreaded.
 #[tauri::command]
 pub async fn glint_ask(
     app: AppHandle,
     question: String,
     scope: String,
     day: Option<String>,
+    thread_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let question = question.trim().to_string();
     if question.is_empty() {
         return Err("Ask a question about your captured context.".to_string());
     }
+    let thread_id = thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
 
     // 1. Resolve the LiteRT runtime (paths for model-generate).
     let resolution = crate::bridge::run_sidecar_async(&app, &["runtime-status"])
@@ -1412,6 +1595,17 @@ pub async fn glint_ask(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+
+    // 1b. Thread history (best effort) + persist the question. History holds
+    // previous turns only; the current question is appended first so a crash
+    // mid-generation still leaves a truthful thread.
+    let history_text = match &thread_id {
+        Some(id) => load_thread_history(&app, id).await,
+        None => String::new(),
+    };
+    if let Some(id) = &thread_id {
+        append_chat(&app, id, "user", &question, None, None).await;
+    }
 
     // 2. Pull scan records and filter by scope.
     let root = crate::bridge::data_root()?;
@@ -1499,6 +1693,10 @@ pub async fn glint_ask(
         }
     }
     const CONTEXT_BUDGET: usize = 3_500;
+    // History shares the worker's input budget with the session evidence:
+    // shrink the session side by whatever history takes, so the total prompt
+    // stays within the token limit history or not.
+    let session_budget = CONTEXT_BUDGET.saturating_sub(history_text.len());
     let mut context = String::new();
     let mut cited = Vec::new();
     let mut index = 0usize;
@@ -1577,7 +1775,7 @@ pub async fn glint_ask(
             },
             key = if key.is_empty() { "-".to_string() } else { key },
         );
-        if context.len() + entry.len() > CONTEXT_BUDGET {
+        if context.len() + entry.len() > session_budget {
             break;
         }
         context.push_str(&entry);
@@ -1596,17 +1794,18 @@ pub async fn glint_ask(
     }
 
     let (period, opener) = scope_phrases(&scope);
-    let prompt = format!(
-        "You narrate the user's activity {period} from their activity log. Write like this: \
-         \"{opener} You played Stellar Blade for 5 mins, \
-         you compared LLM models for about 3-4 mins...\" Then a 'Summary:' \
-         line with 3-6 dash-led bullet points (- ...) of key facts with [n] \
-         citations. Rules: every activity gets its GIVEN duration — never \
-         invent or round durations; order oldest-first (entries are listed \
-         newest-first, so reorder); merge trivial repeats silently; if \
-         evidence is thin, say what you know and what you don't; answer ONLY \
-         from the sessions below.\n\nQuestion: {question}\n\nSessions (newest first):\n{context}"
-    );
+    let history_section = if history_text.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nConversation so far (most recent last):\n{history_text}\n\n\
+             The user may be correcting or disputing the previous answer. If so, \
+             re-derive the disputed claims from the sessions below, state what \
+             changed and why, and never restate a disputed claim without citing \
+             the evidence for it."
+        )
+    };
+    let prompt = build_ask_prompt(&period, &opener, &question, &context, &history_section);
 
     // 4. Generate via the existing model-generate verb (5 min cap inside).
     // Serialized with scan ticks (one model load at a time). Transient
@@ -1617,7 +1816,7 @@ pub async fn glint_ask(
     let mut last_error = "The local model produced no output.".to_string();
     let mut generated: Option<serde_json::Value> = None;
     for attempt in 0..2 {
-        let args = vec![
+        let mut args = vec![
             "model-generate".to_string(),
             "--python".to_string(),
             python.clone(),
@@ -1634,6 +1833,19 @@ pub async fn glint_ask(
             "--prompt".to_string(),
             prompt.clone(),
         ];
+        // First answers stay deterministic (temp 0, seed 1) so the same
+        // question repeats stably. Follow-ups with history sample instead:
+        // temp 0 plus a fixed seed would regurgitate the previous answer no
+        // matter what the correction said.
+        if history_text.is_empty() {
+            args.push("--temperature".to_string());
+            args.push("0".to_string());
+            args.push("--seed".to_string());
+            args.push("1".to_string());
+        } else {
+            args.push("--temperature".to_string());
+            args.push("0.7".to_string());
+        }
         let blocking_app = app.clone();
         let started = std::time::Instant::now();
         let output = tokio::task::spawn_blocking(move || {
@@ -1667,10 +1879,16 @@ pub async fn glint_ask(
             }
         }
     }
-    let generated = generated.ok_or_else(|| {
-        log_ask_failure(&question, prompt.len(), scoped.len(), &last_error);
-        last_error
-    })?;
+    let generated = match generated {
+        Some(value) => value,
+        None => {
+            log_ask_failure(&question, prompt.len(), scoped.len(), &last_error);
+            if let Some(id) = &thread_id {
+                append_chat(&app, id, "error", &last_error, None, None).await;
+            }
+            return Err(last_error);
+        }
+    };
     let answer = generated
         .get("text")
         .and_then(|v| v.as_str())
@@ -1678,7 +1896,14 @@ pub async fn glint_ask(
         .trim()
         .to_string();
     if answer.is_empty() {
+        if let Some(id) = &thread_id {
+            append_chat(&app, id, "error", "The local model produced no answer.", None, None).await;
+        }
         return Err("The local model produced no answer.".to_string());
+    }
+    if let Some(id) = &thread_id {
+        let citations_json = serde_json::to_string(&cited).unwrap_or_else(|_| "[]".to_string());
+        append_chat(&app, id, "agent", &answer, Some(citations_json), Some(scoped.len())).await;
     }
     Ok(serde_json::json!({
         "answer": answer,
@@ -1686,6 +1911,152 @@ pub async fn glint_ask(
         "scopedCount": scoped.len(),
         "totalCount": all_scans.len(),
     }))
+}
+
+/// The full ask prompt, pure for tests. Glint talks like a normal chatbot
+/// that happens to remember the user's screen: warm, direct, a few
+/// sentences, structure only when the message calls for it. There is no
+/// mandatory narration, no forced Summary section, no obligatory durations —
+/// that rigidity is what made every greeting come back as a robot report.
+/// Conversation turns are quarantined from evidence: [n] citations may only
+/// point at the numbered sessions, never at a previous assistant turn.
+fn build_ask_prompt(
+    period: &str,
+    _opener: &str,
+    question: &str,
+    context: &str,
+    history_section: &str,
+) -> String {
+    format!(
+        "You are Glint, a friendly local assistant with a memory of the user's captured \
+         on-screen activity {period}. Talk like a normal chatbot: warm, direct, a few \
+         sentences. Answer the user's actual message — a greeting gets a greeting, a \
+         question gets an answer, a correction gets a revised answer that states what \
+         changed and why. Structure (lists, headings) only when it genuinely helps; \
+         never force a Summary section or bullet list onto a message that does not ask \
+         for one. You have the user's activity log below as numbered sessions ([n]). \
+         Use it whenever the message is about what they did, and put a [n] citation \
+         right after any fact it supports. Never invent activities, people, times, or \
+         durations that are not in the sessions or conversation above. If the evidence \
+         is thin, say what you know briefly and offer to look wider. Describe what \
+         happened; prefer times of day over durations. Only state how long something \
+         took if asked, and then give it as a wall-clock span, never as engaged time. \
+         Order oldest-first (entries are listed newest-first, so reorder); merge \
+         trivial repeats silently. Conversation turns above are NOT evidence: [n] \
+         citations may only point at the numbered sessions below, never at a previous \
+         assistant turn.{history_section}\n\nQuestion: {question}\n\nSessions (newest first):\n{context}"
+    )
+}
+
+/// Previous turns of a chat thread, oldest first, capped so the session
+/// evidence keeps budget priority. Best effort: any failure yields no
+/// history and the ask proceeds unthreaded.
+async fn load_thread_history(app: &AppHandle, thread_id: &str) -> String {
+    let owned = vec![
+        "chat-thread".to_string(),
+        "--id".to_string(),
+        thread_id.to_string(),
+        "--limit".to_string(),
+        "200".to_string(),
+    ];
+    let root = match crate::bridge::data_root() {
+        Ok(root) => root,
+        Err(_) => return String::new(),
+    };
+    let mut args: Vec<String> = owned;
+    args.extend(crate::bridge::db_args(app, &root));
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let messages = crate::bridge::run_sidecar_async(app, &refs)
+        .await
+        .ok()
+        .and_then(|out| out.json.get("messages").cloned())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    shape_history(&messages, 800)
+}
+
+/// Last two exchanges (user/agent turns), oldest first, newest kept when
+/// trimming. Pure for tests.
+fn shape_history(messages: &[serde_json::Value], budget: usize) -> String {
+    const PER_TURN: usize = 300;
+    let mut turns: Vec<String> = Vec::new();
+    for message in messages {
+        let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let label = match role {
+            "user" => "User",
+            "agent" => "Assistant",
+            "error" => "System",
+            _ => continue,
+        };
+        let text = message
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if text.is_empty() {
+            continue;
+        }
+        let clipped: String = text.chars().take(PER_TURN).collect();
+        let clipped = if text.chars().count() > PER_TURN {
+            format!("{clipped}...")
+        } else {
+            clipped
+        };
+        turns.push(format!("{label}: {clipped}"));
+    }
+    // Keep the newest turns that fit; the latest turn (often the correction
+    // itself) is never dropped while anything is kept.
+    let mut kept: Vec<&String> = Vec::new();
+    let mut used = 0usize;
+    for turn in turns.iter().rev() {
+        if !kept.is_empty() && used + turn.len() + 1 > budget {
+            break;
+        }
+        used += turn.len() + 1;
+        kept.push(turn);
+    }
+    kept.reverse();
+    kept
+        .iter()
+        .map(|turn| turn.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Best-effort chat persistence: failures are swallowed so a store hiccup
+/// can never fail an answer.
+async fn append_chat(
+    app: &AppHandle,
+    thread_id: &str,
+    role: &str,
+    text: &str,
+    citations_json: Option<String>,
+    scoped: Option<usize>,
+) {
+    let root = match crate::bridge::data_root() {
+        Ok(root) => root,
+        Err(_) => return,
+    };
+    let mut args = vec![
+        "chat-append".to_string(),
+        "--thread".to_string(),
+        thread_id.to_string(),
+        "--role".to_string(),
+        role.to_string(),
+        "--text".to_string(),
+        text.to_string(),
+    ];
+    if let Some(citations) = citations_json {
+        args.push("--citations".to_string());
+        args.push(citations);
+    }
+    if let Some(scoped) = scoped {
+        args.push("--scoped".to_string());
+        args.push(scoped.to_string());
+    }
+    args.extend(crate::bridge::db_args(app, &root));
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let _ = crate::bridge::run_sidecar_async(app, &refs).await;
 }
 
 /// Global shortcut registration state (never silent on conflict: the
@@ -1731,7 +2102,7 @@ pub fn glint_timeline(app: AppHandle, date: Option<String>) -> Result<serde_json
 
 #[cfg(test)]
 mod tests {
-    use super::{is_retryable, scope_phrases};
+    use super::{build_ask_prompt, is_retryable, scope_phrases, shape_history};
 
     #[test]
     fn scope_wording_follows_the_selected_range() {
@@ -1758,5 +2129,73 @@ mod tests {
         assert!(is_retryable("LiteRT-LM worker exited unexpectedly"));
         assert!(is_retryable("timed out"));
         assert!(is_retryable(""));
+    }
+
+    fn history_message(role: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({"role": role, "text": text})
+    }
+
+    #[test]
+    fn empty_history_shapes_to_nothing() {
+        assert_eq!(shape_history(&[], 800), "");
+    }
+
+    #[test]
+    fn history_keeps_speakers_in_order_and_skips_unknown_roles() {
+        let messages = vec![
+            history_message("user", "What did I do?"),
+            history_message("agent", "You coded."),
+            history_message("system", "migrated"),
+            history_message("user", "thats wrong"),
+        ];
+        let shaped = shape_history(&messages, 800);
+        assert!(shaped.starts_with("User: What did I do?"), "{shaped}");
+        assert!(shaped.contains("Assistant: You coded."), "{shaped}");
+        assert!(shaped.ends_with("User: thats wrong"), "{shaped}");
+    }
+
+    #[test]
+    fn history_trims_oldest_first_but_never_drops_the_latest_turn() {
+        let messages = vec![
+            history_message("user", &"q".repeat(500)),
+            history_message("agent", &"a".repeat(500)),
+            history_message("user", "thats wrong"),
+        ];
+        let shaped = shape_history(&messages, 800);
+        assert!(shaped.ends_with("User: thats wrong"), "{shaped}");
+        assert!(shaped.len() <= 800, "{shaped}");
+    }
+
+    #[test]
+    fn error_turns_shape_as_system_notes() {
+        let messages = vec![history_message("error", "worker was busy")];
+        assert_eq!(shape_history(&messages, 800), "System: worker was busy");
+    }
+
+    #[test]
+    fn ask_prompt_has_no_mandatory_summary_section() {
+        let prompt = build_ask_prompt("today", "Today", "whats up? hows today?", "[0] x", "");
+        assert!(!prompt.contains("Then a 'Summary:'"), "{prompt}");
+        assert!(!prompt.contains("3-6 dash-led bullet"), "{prompt}");
+        assert!(prompt.contains("Answer the user's actual message"), "{prompt}");
+        assert!(
+            prompt.contains("Only state how long something took if asked"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn ask_prompt_quarantines_history_from_citations() {
+        let with_history = build_ask_prompt(
+            "today",
+            "Today",
+            "thats wrong",
+            "[0] x",
+            "\n\nConversation so far (most recent last):\nUser: hi",
+        );
+        assert!(with_history.contains("never at a previous assistant turn"), "{with_history}");
+        assert!(with_history.contains("Conversation so far"), "{with_history}");
+        let without_history = build_ask_prompt("today", "Today", "what did I do?", "[0] x", "");
+        assert!(!without_history.contains("Conversation so far"), "{without_history}");
     }
 }

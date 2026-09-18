@@ -122,7 +122,7 @@ pub fn decide(signals: CaptureSignals) -> CaptureDecision {
 use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
-use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
 
 /// Milliseconds since the last keyboard or mouse input, system-wide.
 /// Unknown reads as active, so a failing API can never silently stop capture.
@@ -154,6 +154,20 @@ pub fn on_battery() -> bool {
 /// The foreground window handle, used only to notice that it changed.
 pub fn foreground_handle() -> isize {
     unsafe { GetForegroundWindow().0 as isize }
+}
+
+/// The foreground window title, used only to notice in-app navigation inside
+/// one unchanged window (Discord server hop, browser tab). Empty when there
+/// is no foreground window or the title cannot be read; callers treat empty
+/// as "no information" rather than a change, so a transient failed read can
+/// never fake a navigation event.
+pub fn foreground_title() -> String {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        let mut buf = [0u16; 512];
+        let read = GetWindowTextW(hwnd, &mut buf).max(0) as usize;
+        String::from_utf16_lossy(&buf[..read.min(buf.len())])
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +301,9 @@ mod tests {
         assert!(idle < 7 * 24 * 60 * 60 * 1000, "implausible idle_ms: {idle}");
         let _ = on_battery();
         let _ = foreground_handle();
+        // Must never panic, even with no foreground window; empty means "no
+        // information" and the scan loop ignores it.
+        let _ = foreground_title();
     }
 
     #[test]

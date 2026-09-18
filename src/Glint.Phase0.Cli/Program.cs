@@ -213,6 +213,87 @@ try
             break;
         }
 
+        // Agent chat history. All chat text lives in the encrypted store;
+        // nothing here prints prompts or answers to metrics, only the JSON
+        // documents the frontend asked for.
+        case "chat-threads":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            var limit = int.TryParse(options.GetValueOrDefault("limit"), out var parsedLimit)
+                ? Math.Clamp(parsedLimit, 1, 200)
+                : 50;
+            WriteJson(new { threads = database.GetRecentChatThreads(limit) }, json);
+            break;
+        }
+
+        case "chat-thread":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            var id = RequireOption(options, "id");
+            var thread = database.GetChatThread(id)
+                ?? throw new ArgumentException($"Unknown chat thread: {id}.");
+            var limit = int.TryParse(options.GetValueOrDefault("limit"), out var parsedLimit)
+                ? Math.Clamp(parsedLimit, 1, 2_000)
+                : 200;
+            WriteJson(
+                new { thread, messages = database.GetChatMessages(id, limit) },
+                json);
+            break;
+        }
+
+        case "chat-create":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            WriteJson(
+                database.CreateChatThread(
+                    RequireOption(options, "title"),
+                    options.GetValueOrDefault("scope", "all") ?? "all",
+                    long.TryParse(options.GetValueOrDefault("at"), out var parsedAt)
+                        ? parsedAt
+                        : now),
+                json);
+            break;
+        }
+
+        case "chat-rename":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            var id = RequireOption(options, "id");
+            database.RenameChatThread(
+                id,
+                RequireOption(options, "title"),
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            WriteJson(new { id }, json);
+            break;
+        }
+
+        case "chat-delete":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            var id = RequireOption(options, "id");
+            database.DeleteChatThread(id);
+            WriteJson(new { id }, json);
+            break;
+        }
+
+        case "chat-append":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            WriteJson(
+                database.AppendChatMessage(
+                    RequireOption(options, "thread"),
+                    RequireOption(options, "role"),
+                    RequireOption(options, "text"),
+                    options.GetValueOrDefault("citations", "[]") ?? "[]",
+                    int.TryParse(options.GetValueOrDefault("scoped"), out var parsedScoped)
+                        ? parsedScoped
+                        : 0,
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
+                json);
+            break;
+        }
+
         case "manual-scan":
         {
             await DelayAsync(options);
@@ -276,8 +357,20 @@ try
                 new LiteRtGenerationRequest(
                     RequireOption(options, "prompt"),
                     options.GetValueOrDefault("system"),
-                    Temperature: 0,
-                    Seed: 1),
+                    Temperature: double.TryParse(
+                            options.GetValueOrDefault("temperature"),
+                            System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            out var parsedTemperature)
+                        ? parsedTemperature
+                        : 0,
+                    Seed: int.TryParse(
+                            options.GetValueOrDefault("seed"),
+                            System.Globalization.NumberStyles.Integer,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            out var parsedSeed)
+                        ? parsedSeed
+                        : null),
                 TimeSpan.FromMinutes(5));
             WriteJson(result, json);
             break;
@@ -343,7 +436,8 @@ try
             }
 
             using var database = OpenDatabase(dataRoot, options);
-            // One worker for every summary in this run.
+            // One worker reused for every summary in this run, so the model
+            // loads once no matter how many sessions are summarized.
             using var sessionWorker = new PersistentLiteRtWorker(
                 resolution.PythonExecutable!,
                 resolution.WorkerScript!,
@@ -538,7 +632,7 @@ try
                   runtime-status [--data-dir PATH]
                   search-context --query TEXT [--limit 30] [--data-dir PATH]
                   model-probe --runtime PATH --model PATH
-                  model-generate --python PATH --worker PATH --model PATH --prompt TEXT [--backend cpu]
+                  model-generate --python PATH --worker PATH --model PATH --prompt TEXT [--backend cpu] [--temperature 0] [--seed 1]
                   session-outcome --id ID --outcome open|settled|unknown [--data-dir PATH]
                   mark --kind run.started|run.stopped|user.away|user.returned [--at MS]
                   sessions [--limit 50] [--data-dir PATH] [--sqlite-vec PATH]

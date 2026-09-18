@@ -4,7 +4,9 @@ import {
   formatClock,
   formatTimestamp,
   glintHistory,
+  glintSessions,
   glintTimeline,
+  sessionView,
 } from "../glint";
 import ScanCard from "../components/ScanCard";
 
@@ -98,7 +100,13 @@ function clusterSessions(scans) {
   return clusters;
 }
 
-function SessionHeader({ scans }) {
+/**
+ * A sealed stretch of captures. When the session has been summarized, its
+ * label/summary render here — this is the "session above" the scan cards
+ * promise ("its summary is on the session above"). Ungrouped scans and
+ * not-yet-summarized sessions keep the plain structural header.
+ */
+function SessionHeader({ scans, session }) {
   const times = scans
     .map((s) => Number(s.capturedAtMilliseconds))
     .sort((a, b) => a - b);
@@ -107,6 +115,7 @@ function SessionHeader({ scans }) {
     times.length > 1
       ? `${hourMinute(times[0])}–${hourMinute(times[times.length - 1])}`
       : hourMinute(times[0]);
+  const view = session ? sessionView(session) : null;
   return (
     <div className="session-header">
       <span className="session-tick" aria-hidden="true" />
@@ -114,11 +123,32 @@ function SessionHeader({ scans }) {
         Session · {process} · {range} · {scans.length} scan
         {scans.length === 1 ? "" : "s"}
       </span>
+      {view && (
+        <div className="session-summary-block">
+          <div className="scan-label">{view.label}</div>
+          <div className="scan-summary">{view.summary}</div>
+          {view.important && (
+            <div className="scan-important">{view.important}</div>
+          )}
+          {view.reminder && (
+            <div className="scan-reminder">{view.reminder}</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function renderScanList(scans, emptyText) {
+/** A grouped cluster always renders with its session header: scan cards
+ * promise "its summary is on the session above" whenever they carry a
+ * sessionId, so the header must exist even before the summary lands (or the
+ * promise points at nothing). The header shows the summary once present,
+ * otherwise a truthful pending/minor note. */
+function shouldShowHeader(cluster) {
+  return Boolean(cluster.sessionId);
+}
+
+function renderScanList(scans, emptyText, sessionsById = {}) {
   if (scans.length === 0) {
     return (
       <div className="scan-list">
@@ -131,11 +161,18 @@ function renderScanList(scans, emptyText) {
   return (
     <div className="scan-list">
       {clusterSessions(scans).map((cluster) =>
-        cluster.sessionId && cluster.scans.length > 1 ? (
+        shouldShowHeader(cluster) ? (
           <div key={cluster.sessionId}>
-            <SessionHeader scans={cluster.scans} />
+            <SessionHeader
+              scans={cluster.scans}
+              session={sessionsById[cluster.sessionId]}
+            />
             {cluster.scans.map((scan) => (
-              <ScanCard key={scan.id} scan={scan} />
+              <ScanCard
+                key={scan.id}
+                scan={scan}
+                session={sessionsById[cluster.sessionId]}
+              />
             ))}
           </div>
         ) : (
@@ -157,7 +194,11 @@ function TimelinePage() {
   const [hour, setHour] = useState(new Date().getHours());
   const [hourTab, setHourTab] = useState("summarized");
   const [history, setHistory] = useState([]);
+  const [sessions, setSessions] = useState([]);
   const [eventsCache, setEventsCache] = useState({});
+  const sessionsById = Object.fromEntries(
+    (sessions ?? []).map((s) => [s.id, s])
+  );
   const now = new Date();
   const [monthCursor, setMonthCursor] = useState({
     year: now.getFullYear(),
@@ -172,6 +213,13 @@ function TimelinePage() {
       })
       .catch(() => {
         if (!cancelled) setHistory([]);
+      });
+    glintSessions(50)
+      .then((response) => {
+        if (!cancelled) setSessions(response.sessions ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setSessions([]);
       });
     return () => {
       cancelled = true;
@@ -222,6 +270,30 @@ function TimelinePage() {
         if (prev.some((s) => s.id === record.id)) return prev;
         return [record, ...prev].slice(0, 500);
       });
+    }).then((fn) => (unlisten = fn));
+    return () => unlisten?.();
+  }, []);
+
+  // Session seals and summaries land here: sealing stamps sessionIds onto
+  // scans (ungrouped cards join their cluster) and summaries fill the
+  // session headers. Without this the timeline never shows a summarisation
+  // until the page is remounted. All-quiet ticks (every count zero, the
+  // common case while a stretch is still open) skip the refetch so an idle
+  // scan loop does not respawn two sidecars every 2 s for nothing.
+  useEffect(() => {
+    let unlisten;
+    listen("sessions-updated", (event) => {
+      const r = event.payload ?? {};
+      const changed = ["sealed", "summarized", "failed", "minor", "decided", "threaded"].some(
+        (k) => Number(r[k] ?? 0) > 0
+      );
+      if (event.payload && !changed) return;
+      glintHistory(500)
+        .then((response) => setHistory(response.history ?? []))
+        .catch(() => {});
+      glintSessions(50)
+        .then((response) => setSessions(response.sessions ?? []))
+        .catch(() => {});
     }).then((fn) => (unlisten = fn));
     return () => unlisten?.();
   }, []);
@@ -416,11 +488,18 @@ function TimelinePage() {
             );
           }
           const cluster = item.cluster;
-          return cluster.sessionId && cluster.scans.length > 1 ? (
+          return shouldShowHeader(cluster) ? (
             <div key={cluster.sessionId}>
-              <SessionHeader scans={cluster.scans} />
+              <SessionHeader
+                scans={cluster.scans}
+                session={sessionsById[cluster.sessionId]}
+              />
               {cluster.scans.map((scan) => (
-                <ScanCard key={scan.id} scan={scan} />
+                <ScanCard
+                  key={scan.id}
+                  scan={scan}
+                  session={sessionsById[cluster.sessionId]}
+                />
               ))}
             </div>
           ) : (
@@ -535,7 +614,8 @@ function TimelinePage() {
             {hourTab === "summarized" ? (
               renderScanList(
                 scansInHour(dayStr, hour),
-                "No summarized notes this hour. Switch to Timeline to see every switch that happened."
+                "No summarized notes this hour. Switch to Timeline to see every switch that happened.",
+                sessionsById
               )
             ) : (
               <div className="scan-list">

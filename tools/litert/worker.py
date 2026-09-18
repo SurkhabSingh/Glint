@@ -55,6 +55,9 @@ def emit(payload):
 
 
 def generate(engine, request):
+    prompt = request.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("Request is missing a non-empty text 'prompt'.")
     sampler = litert_lm.SamplerConfig(
         top_k=request.get("topK"),
         top_p=request.get("topP"),
@@ -65,7 +68,7 @@ def generate(engine, request):
         sampler_config=sampler,
         system_message=request.get("systemPrompt"),
     ) as conversation:
-        return conversation.send_message(request["prompt"])
+        return conversation.send_message(prompt)
 
 
 def main():
@@ -90,6 +93,7 @@ def main():
             if not line:
                 continue
             started = time.perf_counter()
+            request = None
             request_id = None
             try:
                 request = json.loads(line)
@@ -116,11 +120,15 @@ def main():
                     }
                 )
             except Exception as error:  # noqa: BLE001 - reported to the client
+                # Native failures often carry an empty message; never emit an
+                # empty error, or the client can only report "an unknown error".
+                detail = str(error).strip() or repr(error) or "unknown failure"
                 emit(
                     {
                         "id": request_id,
                         "ok": False,
-                        "error": f"{type(error).__name__}: {error}",
+                        "op": request.get("op") if isinstance(request, dict) else None,
+                        "error": f"{type(error).__name__}: {detail}",
                         "elapsedMilliseconds": (time.perf_counter() - started) * 1000,
                     }
                 )

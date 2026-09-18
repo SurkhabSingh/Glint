@@ -170,3 +170,60 @@ public interface IActivitySummarizer
         string redactedText,
         CancellationToken cancellationToken = default);
 }
+
+/// One agent conversation. Titles are derived from the first question, never
+/// model-generated, so opening a chat costs no inference.
+public sealed record ChatThread(
+    string Id,
+    string Title,
+    string Scope,
+    long CreatedAtMilliseconds,
+    long UpdatedAtMilliseconds);
+
+/// One turn inside a chat thread. Citations are stored as JSON so a reopened
+/// chat renders its evidence exactly as answered, independent of later data.
+public sealed record ChatMessage(
+    string Id,
+    string ThreadId,
+    string Role,
+    string Text,
+    string CitationsJson,
+    int ScopedCount,
+    long CreatedAtMilliseconds);
+
+/// Chat roles, stored as plain strings. Kept small on purpose: user turns,
+/// agent answers, and failed answers.
+public static class ChatRoles
+{
+    public const string User = "user";
+    public const string Agent = "agent";
+    public const string Error = "error";
+
+    public static bool IsValid(string? role) =>
+        role is User or Agent or Error;
+}
+
+/// Store operations for agent chat history. Chat text lives only in this
+/// encrypted store: never in metrics, logs, or the timeline feed.
+public interface IChatStore
+{
+    ChatThread CreateChatThread(string title, string scope, long atMilliseconds);
+
+    IReadOnlyList<ChatThread> GetRecentChatThreads(int limit = 50);
+
+    ChatThread? GetChatThread(string id);
+
+    void RenameChatThread(string id, string title, long atMilliseconds);
+
+    void DeleteChatThread(string id);
+
+    ChatMessage AppendChatMessage(
+        string threadId,
+        string role,
+        string text,
+        string citationsJson,
+        int scopedCount,
+        long atMilliseconds);
+
+    IReadOnlyList<ChatMessage> GetChatMessages(string threadId, int limit = 200);
+}

@@ -456,24 +456,51 @@
 .session-header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin: 14px 2px 8px;
-  font-size: 12px;
+  gap: 0.625rem;
+  margin: 0.875rem 0.125rem 0.5rem;
+  font-size: 0.75rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.8px;
+  letter-spacing: 0.05rem;
   color: rgba(255, 255, 255, 0.6);
 }
 
 .session-header:first-child {
-  margin-top: 2px;
+  margin-top: 0.125rem;
+}
+
+/* Session summary inside a timeline group header: full-width block under the
+   structural line, reusing scan-card typography so summaries read the same
+   everywhere they appear. */
+.session-header {
+  flex-wrap: wrap;
+}
+
+.session-header .session-summary-block {
+  flex: 1 1 100%;
+  margin: 0.125rem 0 0.125rem 0.8125rem;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.session-header .session-summary-block .scan-label {
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.session-header .session-summary-block .scan-summary {
+  margin-top: 0.125rem;
+  font-size: 0.8125rem;
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.78);
 }
 
 .session-tick {
   flex: 0 0 auto;
-  width: 3px;
+  width: 0.1875rem;
   align-self: stretch;
-  border-radius: 2px;
+  border-radius: 0.125rem;
   background: var(--accent-color);
 }
 
@@ -596,24 +623,189 @@
 /* ---- Agent chat ---- */
 .chat-layout {
   display: flex;
-  flex-direction: column;
+  /* flex-direction: column; */
   min-height: 100%;
-  padding: 0px;
+  padding: 0;
 }
 
 .chat-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin-top: 16px;
-  margin-bottom: 26px;
+  gap: 0.625rem;
+  margin-top: 1rem;
+  margin-bottom: 1.625rem;
+}
+
+/* ---- Agent thread panel (chat history, Claude-style) ---- */
+/* Breaks out of the narrow page column: full-height dark sidebar on the
+   left, centered article column on the right. */
+.glint-page-inner.narrow.agent-full {
+  max-width: none;
+  height: 100%;
+  min-height: 0;
+  padding: 0 1.75rem 0 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-shell {
+  display: flex;
+  gap: 0;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+
+/* No global border-box reset exists in this app (content-box default), so
+   width:100%/min-height:100% combined with padding would overflow by exactly
+   the padding amounts — a permanent vertical scrollbar plus a horizontal one.
+   Scope the reset to this layout instead of reflowing the whole app. */
+.chat-shell,
+.chat-shell *,
+.chat-shell *::before,
+.chat-shell *::after {
+  box-sizing: border-box;
+}
+
+.chat-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  overflow-y: auto;
+}
+
+.chat-conversation {
+  width: 100%;
+  max-width: 53.75rem;
+  margin: 0 auto;
+  padding: 1.25rem 1.5rem 1rem;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  align-items: stretch;
+  min-height: 100%;
+}
+
+.chat-threads {
+  flex: 0 0 15.5rem;
+  align-self: stretch;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  background: rgba(0, 0, 0, 0.38);
+  border-right: 0.0625rem solid rgba(255, 255, 255, 0.07);
+  padding: 0.875rem 0.625rem;
+}
+
+.chat-new-full {
+  width: 100%;
+  justify-content: flex-start;
+  font-size: 0.875rem;
+  padding: 0.5625rem 0.75rem;
+  margin-bottom: 0.875rem;
+}
+
+.chat-threads-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.55);
+  padding: 0.125rem 0.5rem 0.375rem;
+}
+
+.chat-new {
+  font-size: 0.75rem;
+  padding: 0.25rem 0.625rem;
+}
+
+.chat-threads-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.chat-group-label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: #9e9ea7;
+  padding: 0.5rem 0.25rem 0.25rem;
+}
+
+.chat-thread {
+  display: flex;
+  align-items: baseline;
+  gap: 0.375rem;
+  padding: 0.5rem 0.625rem;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  font-size: 0.844rem;
+}
+
+.chat-thread:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.chat-thread.active {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.chat-thread-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.chat-thread-time {
+  flex: 0 0 auto;
+  font-size: 0.6875rem;
+  color: #9e9ea7;
+}
+
+.chat-thread-delete {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: #9e9ea7;
+  font-size: 0.875rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0.125rem;
+  border-radius: 0.375rem;
+}
+
+.chat-thread-delete:hover {
+  color: #ff8a8a;
+  background: rgba(255, 120, 120, 0.12);
+}
+
+.chat-threads-empty {
+  font-size: 0.781rem;
+  color: #9e9ea7;
+  padding: 0.5rem 0.25rem;
+}
+
+.chat-time {
+  margin-top: 0.375rem;
+  font-size: 0.6875rem;
+  color: #9e9ea7;
 }
 
 .chat-msg {
   max-width: 92%;
-  padding: 12px 16px;
-  border-radius: 14px;
-  font-size: 13.5px;
+  padding: 0.75rem 1rem;
+  border-radius: 0.875rem;
+  font-size: 0.844rem;
   line-height: 1.55;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -621,42 +813,49 @@
 
 .chat-msg.user {
   align-self: flex-end;
-  background: var(--accent-color);
+  background: #2f2f2f;
   color: #fff;
-  border-bottom-right-radius: 4px;
+  border-radius: 1.125rem;
+  border-bottom-right-radius: 0.25rem;
+  max-width: 80%;
 }
 
 .chat-msg.agent {
   align-self: flex-start;
+  width: fit-content;
+  max-width: 100%;
   background: var(--card-bg);
   border: var(--card-border);
   box-shadow: var(--card-highlight);
-  border-bottom-left-radius: 4px;
+  padding: 1rem 1.25rem;
+  font-size: 0.906rem;
+  line-height: 1.75;
+  border-radius: 0.875rem;
 }
 
 .chat-msg.error {
   align-self: flex-start;
   background: rgba(164, 38, 44, 0.4);
-  border: 1px solid rgba(255, 120, 120, 0.35);
+  border: 0.0625rem solid rgba(255, 120, 120, 0.35);
 }
 
 .chat-citations {
-  margin-top: 10px;
+  margin-top: 0.625rem;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 0.375rem;
 }
 
 .chat-cite-head {
-  font-size: 11px;
+  font-size: 0.6875rem;
   text-transform: uppercase;
-  letter-spacing: 0.8px;
+  letter-spacing: 0.05rem;
   color: #9e9ea7;
   cursor: pointer;
   list-style: none;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 0.375rem;
 }
 
 .chat-cite-head::-webkit-details-marker {
@@ -674,36 +873,36 @@
 }
 
 .chat-citations .chat-cite {
-  margin-top: 6px;
+  margin-top: 0.375rem;
 }
 
 .chat-cite {
-  padding: 8px 12px;
-  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
   background: rgba(0, 0, 0, 0.22);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  font-size: 12.5px;
+  border: 0.0625rem solid rgba(255, 255, 255, 0.08);
+  font-size: 0.781rem;
 }
 
 .chat-cite strong {
   display: block;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .chat-cite span {
   color: rgba(255, 255, 255, 0.6);
-  font-size: 11.5px;
+  font-size: 0.719rem;
 }
 
 .typing {
   display: flex;
-  gap: 5px;
-  padding: 4px 2px;
+  gap: 0.3125rem;
+  padding: 0.25rem 0.125rem;
 }
 
 .typing span {
-  width: 7px;
-  height: 7px;
+  width: 0.4375rem;
+  height: 0.4375rem;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.6);
   animation: typing-bounce 1.2s ease-in-out infinite;
