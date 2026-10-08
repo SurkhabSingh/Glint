@@ -301,15 +301,162 @@ try
             // runtime and works even before one is installed. Summaries
             // arrive per session, from the sessionize verb.
             using var database = OpenDatabase(dataRoot, options);
-            var coordinator = new ManualScanCoordinator(
+            // The activity model: identity first, then what this kind of app
+            // needs. Text only for reading work, compared line by line with
+            // what the same page already stored.
+            var automation = new UiAutomationService();
+            var coordinator = new ActivityScanCoordinator(
                 new ForegroundWindowInspector(HostProcessId(options)),
-                new UiAutomationService(),
+                automation,
+                automation,
                 new PrivacyGate(),
                 new WindowsGraphicsCaptureService(
                     options.ContainsKey("software-device")),
                 new DeterministicRedactor(),
                 database);
             WriteJson(await coordinator.ScanAsync(), json);
+            break;
+        }
+
+        // Diagnostics: what the page probe sees in a window. Records control
+        // types, names and parsed hosts only, never field values.
+        case "page-probe":
+        {
+            var processName = options.GetValueOrDefault("process");
+            var handle = processName is null
+                ? 0
+                : System.Diagnostics.Process.GetProcessesByName(processName)
+                    .Select(process => process.MainWindowHandle)
+                    .FirstOrDefault(value => value != 0);
+            var target = processName is null
+                ? ResolveWindow(options)
+                : handle == 0 ? null : new ForegroundWindowInspector().Inspect(handle);
+            if (target is null)
+            {
+                throw new InvalidOperationException("No window to probe.");
+            }
+
+            var trace = new List<string>();
+            var probe = new UiAutomationService().ProbePage(target, trace);
+            WriteJson(
+                new
+                {
+                    target.ProcessName,
+                    probe.IsBrowser,
+                    probe.Site,
+                    probe.DocumentBounds,
+                    trace
+                },
+                json);
+            break;
+        }
+
+        // One answer, for diagnostics and scripts. The app uses ask-serve.
+        case "ask":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            var resolution = LiteRtRuntimeLocator.Resolve(AppContext.BaseDirectory, dataRoot);
+            using var worker = resolution.IsReady && !options.ContainsKey("no-model")
+                ? new PersistentLiteRtWorker(
+                    resolution.PythonExecutable!,
+                    resolution.WorkerScript!,
+                    resolution.ModelPath!,
+                    maxNumTokens: 4096,
+                    idleUnloadAfter: Timeout.InfiniteTimeSpan)
+                : null;
+            var answer = await new AskEngine(new DatabaseAskSource(database), worker).AnswerAsync(
+                new AskRequest(
+                    RequireOption(options, "question"),
+                    options.GetValueOrDefault("scope"),
+                    options.GetValueOrDefault("day")));
+            WriteJson(answer, json);
+            break;
+        }
+
+        // The app's Ask: one long-lived process that keeps the model loaded
+        // between questions, so only the first question pays for loading it.
+        // Reads one JSON request per line on stdin and writes one JSON answer
+        // per line on stdout. Questions travel over the pipe, never in argv.
+        case "ask-serve":
+        {
+            var line = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+            using var input = new StreamReader(Console.OpenStandardInput(), new System.Text.UTF8Encoding(false));
+            using var output = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
+            PersistentLiteRtWorker? worker = null;
+            try
+            {
+                while (true)
+                {
+                    var reading = input.ReadLineAsync();
+                    if (await Task.WhenAny(reading, Task.Delay(TimeSpan.FromMinutes(30))) != reading)
+                    {
+                        break; // idle: the host starts a new one when needed
+                    }
+
+                    var requestLine = await reading;
+                    if (requestLine is null)
+                    {
+                        break; // the host closed the pipe
+                    }
+
+                    if (string.IsNullOrWhiteSpace(requestLine))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        var request = JsonSerializer.Deserialize<AskRequest>(requestLine, line)
+                            ?? throw new InvalidDataException("Empty request.");
+                        if (worker is null)
+                        {
+                            var resolution = LiteRtRuntimeLocator.Resolve(AppContext.BaseDirectory, dataRoot);
+                            if (resolution.IsReady)
+                            {
+                                worker = new PersistentLiteRtWorker(
+                                    resolution.PythonExecutable!,
+                                    resolution.WorkerScript!,
+                                    resolution.ModelPath!,
+                                    maxNumTokens: 4096,
+                                    idleUnloadAfter: TimeSpan.FromMinutes(5));
+                            }
+                        }
+
+                        // Opened per question, so every answer sees the latest data.
+                        using var database = OpenDatabase(dataRoot, options);
+                        var answer = await new AskEngine(new DatabaseAskSource(database), worker).AnswerAsync(request);
+                        await output.WriteLineAsync(JsonSerializer.Serialize(answer, line));
+                    }
+                    catch (Exception error)
+                    {
+                        await output.WriteLineAsync(JsonSerializer.Serialize(new { error = $"{error.GetType().Name}: {error.Message}" }, line));
+                    }
+                }
+            }
+            finally
+            {
+                worker?.Dispose();
+            }
+
+            break;
+        }
+
+        // Diagnostics: recording and presence markers in a time range.
+        case "markers":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            var to = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var from = long.TryParse(options.GetValueOrDefault("since"), out var since)
+                ? since
+                : to - 86_400_000;
+            WriteJson(new { markers = database.GetMarkers(from, to) }, json);
+            break;
+        }
+
+        // Diagnostics: what Windows reports as playing.
+        case "media-sessions":
+        {
+            WriteJson(new { sessions = new WindowsMediaSessionReader().Read() }, json);
             break;
         }
 
@@ -428,47 +575,137 @@ try
         // repeatedly; sessions still in progress are left alone.
         case "sessionize":
         {
-            var resolution = LiteRtRuntimeLocator.Resolve(AppContext.BaseDirectory, dataRoot);
-            if (!resolution.IsReady)
-            {
-                throw new InvalidOperationException(
-                    $"Gemma runtime is not ready. Missing: {string.Join(", ", resolution.Missing)}.");
-            }
-
             using var database = OpenDatabase(dataRoot, options);
-            // One worker reused for every summary in this run, so the model
-            // loads once no matter how many sessions are summarized.
-            using var sessionWorker = new PersistentLiteRtWorker(
-                resolution.PythonExecutable!,
-                resolution.WorkerScript!,
-                resolution.ModelPath!,
-                maxNumTokens: 4096,
-                idleUnloadAfter: Timeout.InfiniteTimeSpan);
-            var builder = new SessionBuilder(
-                database,
-                new LiteRtActivitySummarizer(sessionWorker, resolution.ModelId),
-                int.TryParse(options.GetValueOrDefault("max-summaries"), out var maxSummaries)
-                    ? maxSummaries
-                    : 5);
-
-            // --seal-open closes the newest stretch too, for when scanning
-            // stops and there is no "still in progress" left to protect.
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
                 + (options.ContainsKey("seal-open") ? Sessionizer.QuietTailMilliseconds : 0);
+
+            // Sealing sessions and separating activities need no model, so
+            // they run even before the local AI runtime is installed. Only
+            // reading activities wait for it.
+            var sessionBuilder = new SessionBuilder(
+                database,
+                new NoSessionSummaries(),
+                summarizeSessions: false);
+            var sealedResult = await sessionBuilder.RunAsync(now);
+
+            var resolution = LiteRtRuntimeLocator.Resolve(AppContext.BaseDirectory, dataRoot);
+            var maxNarrations = int.TryParse(options.GetValueOrDefault("max-summaries"), out var parsedMax)
+                ? Math.Clamp(parsedMax, 0, 100)
+                : 8;
             var startsBefore = LiteRtWorkerMetrics.StartCount;
-            var built = await builder.RunAsync(now);
+            ActivityBuildResult activities;
+            if (resolution.IsReady && maxNarrations > 0)
+            {
+                // One worker for every summary in this run, so the model loads
+                // once no matter how many activities are described.
+                using var worker = new PersistentLiteRtWorker(
+                    resolution.PythonExecutable!,
+                    resolution.WorkerScript!,
+                    resolution.ModelPath!,
+                    maxNumTokens: 4096,
+                    idleUnloadAfter: Timeout.InfiniteTimeSpan);
+                activities = await new ActivityBuilder(
+                        database,
+                        database,
+                        new LiteRtActivityNarrator(worker),
+                        maxNarrations)
+                    .RunAsync();
+            }
+            else
+            {
+                activities = await new ActivityBuilder(database, database, null).RunAsync();
+            }
+
             WriteJson(
                 new
                 {
-                    built.Sealed,
-                    built.Summarized,
-                    built.Failed,
-                    built.Minor,
-                    built.Decided,
-                    built.Threaded,
+                    sealedResult.Sealed,
+                    // Hosts loop while this is above zero: progress means an
+                    // activity was described in this run.
+                    summarized = activities.Narrated,
+                    failed = activities.NarrationFailed,
+                    sealedResult.Decided,
+                    sealedResult.Threaded,
+                    activities = activities.Activities,
+                    sessionsBuilt = activities.SessionsProcessed,
+                    verified = activities.Verified,
+                    partial = activities.Partial,
+                    fallback = activities.Fallback,
+                    runtimeReady = resolution.IsReady,
                     workerStarts = LiteRtWorkerMetrics.StartCount - startsBefore
                 },
                 json);
+            break;
+        }
+
+        // Activities, newest first: the unit the timeline and Activity page show.
+        case "activities":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            var limit = int.TryParse(options.GetValueOrDefault("limit"), out var parsedLimit)
+                ? Math.Clamp(parsedLimit, 1, 1000)
+                : 200;
+            WriteJson(new { activities = database.GetRecentActivities(limit) }, json);
+            break;
+        }
+
+        // The user's verdict on an activity's task. Absolute: no rule rewrites it.
+        case "activity-task":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            var id = RequireOption(options, "id");
+            var requested = RequireOption(options, "status");
+            if (!Enum.TryParse<ActivityTaskStatus>(requested, ignoreCase: true, out var status))
+            {
+                throw new ArgumentException(
+                    $"--status must be one of: {string.Join(", ", Enum.GetNames<ActivityTaskStatus>())}.");
+            }
+
+            var updated = database.SetActivityTaskStatus(id, status)
+                ?? throw new ArgumentException($"No activity {id}.");
+            WriteJson(new { activity = updated }, json);
+            break;
+        }
+
+        // How Glint treats an app or site: Read, Make, Play, Watch or Private.
+        // The user's choice wins over the catalog and over learning.
+        case "app-mode":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            var key = RequireOption(options, "key");
+            if (!key.StartsWith("app:", StringComparison.Ordinal) && !key.StartsWith("site:", StringComparison.Ordinal))
+            {
+                throw new ArgumentException("--key must start with app: or site:.");
+            }
+
+            if (!Enum.TryParse<ActivityMode>(RequireOption(options, "mode"), ignoreCase: true, out var mode))
+            {
+                throw new ArgumentException(
+                    $"--mode must be one of: {string.Join(", ", Enum.GetNames<ActivityMode>())}.");
+            }
+
+            ActivityCategory? category = null;
+            if (options.TryGetValue("category", out var categoryText))
+            {
+                category = Enum.TryParse<ActivityCategory>(categoryText, ignoreCase: true, out var parsedCategory)
+                    ? parsedCategory
+                    : throw new ArgumentException(
+                        $"--category must be one of: {string.Join(", ", Enum.GetNames<ActivityCategory>())}.");
+            }
+
+            var profile = database.SetAppModeByUser(
+                key,
+                mode,
+                category,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            WriteJson(new { profile }, json);
+            break;
+        }
+
+        case "app-profiles":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            WriteJson(new { profiles = database.GetAppProfiles() }, json);
             break;
         }
 
@@ -636,7 +873,13 @@ try
                   session-outcome --id ID --outcome open|settled|unknown [--data-dir PATH]
                   mark --kind run.started|run.stopped|user.away|user.returned [--at MS]
                   sessions [--limit 50] [--data-dir PATH] [--sqlite-vec PATH]
-                  sessionize [--max-summaries 5] [--seal-open] [--data-dir PATH] [--sqlite-vec PATH]
+                  sessionize [--max-summaries 8] [--seal-open] [--data-dir PATH] [--sqlite-vec PATH]
+                  activities [--limit 200] [--data-dir PATH]
+                  activity-task --id ID --status Open|LooksDone|Done|None [--data-dir PATH]
+                  app-mode --key app:NAME|site:HOST --mode Read|Make|Play|Watch|Private [--category NAME]
+                  app-profiles [--data-dir PATH]
+                  ask --question TEXT [--scope day|week|all] [--day YYYY-MM-DD] [--no-model]
+                  ask-serve [--data-dir PATH]   (JSON lines on stdin/stdout)
                   worker-bench [--runs 3] [--prompt TEXT] [--max-tokens 4096] [--data-dir PATH]
                   activity-summarize --text TEXT [--process NAME] [--title TITLE]
                   model-install --manifest PATH [--data-dir PATH]
@@ -772,3 +1015,20 @@ static async Task<ModelArtifactManifest> ReadModelManifestAsync(
 
 static void WriteJson<T>(T value, JsonSerializerOptions options) =>
     Console.WriteLine(JsonSerializer.Serialize(value, options));
+
+/// <summary>
+/// Stands in for the per-session summarizer, which sessionize no longer
+/// calls: activities are described one at a time instead.
+/// </summary>
+sealed class NoSessionSummaries : IActivitySummarizer
+{
+    public string ModelId => "none";
+
+    public Task<ActivitySummary> SummarizeAsync(
+        DateTimeOffset capturedAt,
+        string processName,
+        string windowTitle,
+        string redactedText,
+        CancellationToken cancellationToken = default) =>
+        throw new InvalidOperationException("Sessions are described per activity.");
+}

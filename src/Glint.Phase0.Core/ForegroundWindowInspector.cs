@@ -21,10 +21,62 @@ public sealed class ForegroundWindowInspector : IForegroundWindowInspector
         _hostProcessId = hostProcessId;
     }
 
+    /// <summary>
+    /// The foreground window, traced back to the window that owns it. A Save
+    /// As dialog, an export window or a pop-up menu belongs to the app's
+    /// main window: inspecting the dialog as its own window made every
+    /// dialog look like a switch to something else.
+    /// </summary>
     public ForegroundWindowInfo? Inspect()
     {
         var handle = NativeMethods.GetForegroundWindow();
-        return Inspect(handle);
+        var owner = handle == 0 ? 0 : NativeMethods.GetAncestor(handle, NativeMethods.GaRootOwner);
+        if (owner == 0 || owner == handle)
+        {
+            return Inspect(handle);
+        }
+
+        _ = NativeMethods.GetWindowThreadProcessId(handle, out var dialogProcess);
+        _ = NativeMethods.GetWindowThreadProcessId(owner, out var ownerProcess);
+        if (dialogProcess == 0 || dialogProcess != ownerProcess)
+        {
+            // Owned across processes: not the same app, so not its dialog.
+            return Inspect(handle);
+        }
+
+        var info = Inspect(owner);
+        return info is null ? Inspect(handle) : info with { DialogTitle = TitleOf(handle) };
+    }
+
+    private static string TitleOf(nint handle)
+    {
+        var length = NativeMethods.GetWindowTextLength(handle);
+        var buffer = new StringBuilder(Math.Max(1, length + 1));
+        _ = NativeMethods.GetWindowText(handle, buffer, buffer.Capacity);
+        return buffer.ToString();
+    }
+
+    private static bool CoversMonitor(nint handle, WindowBounds bounds)
+    {
+        var monitor = NativeMethods.MonitorFromWindow(handle, NativeMethods.MonitorDefaultToNearest);
+        if (monitor == 0 || bounds.Width == 0)
+        {
+            return false;
+        }
+
+        var info = new NativeMethods.MonitorInfo
+        {
+            Size = (uint)System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.MonitorInfo>()
+        };
+        if (!NativeMethods.GetMonitorInfo(monitor, ref info))
+        {
+            return false;
+        }
+
+        return bounds.Left <= info.Monitor.Left
+            && bounds.Top <= info.Monitor.Top
+            && bounds.Right >= info.Monitor.Right
+            && bounds.Bottom >= info.Monitor.Bottom;
     }
 
     public ForegroundWindowInfo? Inspect(nint handle)
@@ -87,7 +139,8 @@ public sealed class ForegroundWindowInspector : IForegroundWindowInspector
             protectedWindow,
             secureDesktop,
             desktopDetermined,
-            IsSelfProcess(processId, Environment.ProcessId, _hostProcessId));
+            IsSelfProcess(processId, Environment.ProcessId, _hostProcessId),
+            IsFullscreen: CoversMonitor(handle, bounds));
     }
 
     internal static bool IsSelfProcess(uint processId, int currentProcessId, int? hostProcessId) =>

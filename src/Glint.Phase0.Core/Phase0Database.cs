@@ -11,7 +11,7 @@ public interface ICaptureEventStore
     void Insert(RawCaptureEvent captureEvent);
 }
 
-    public sealed class Phase0Database : ICaptureEventStore, IManualScanStore, ISessionWorkStore, IChatStore, IDisposable
+public sealed partial class Phase0Database : ICaptureEventStore, IManualScanStore, ISessionWorkStore, IChatStore, IActivityStore, IActivityWorkStore, IDisposable
 {
     private static readonly Lock InitializationLock = new();
     private static bool _sqliteInitialized;
@@ -646,7 +646,8 @@ public interface ICaptureEventStore
         using var command = _connection.CreateCommand();
         command.CommandText =
             """
-            SELECT id, captured_at_ms, process_name, window_title
+            SELECT id, captured_at_ms, process_name, window_title,
+                   COALESCE(last_seen_ms, captured_at_ms)
             FROM manual_scans
             WHERE session_id IS NULL
             ORDER BY captured_at_ms ASC, id ASC
@@ -661,7 +662,8 @@ public interface ICaptureEventStore
                 reader.GetString(0),
                 reader.GetInt64(1),
                 reader.GetString(2),
-                reader.GetString(3)));
+                reader.GetString(3),
+                reader.GetInt64(4)));
         }
 
         return captures;
@@ -949,7 +951,10 @@ public interface ICaptureEventStore
                    m.redactions, m.capture_ms, m.ocr_ms, m.inference_ms,
                    m.important_signals, m.reminder_candidate,
                    m.gemma_context_characters, f.text, m.redacted_uia_text,
-                   m.redacted_ocr_text, m.ocr_language, m.session_id
+                   m.redacted_ocr_text, m.ocr_language, m.session_id,
+                   m.page_key, m.app_name, m.site, m.subject, m.phase, m.mode,
+                   m.category, m.change_kind, m.last_seen_ms, m.user_caused,
+                   m.unsaved, m.dialog_title, m.event_kind
             FROM manual_scans AS m
             LEFT JOIN raw_events_fts AS f
               ON f.content_hash = m.content_hash
@@ -985,7 +990,20 @@ public interface ICaptureEventStore
                 reader.IsDBNull(20) ? null : reader.GetString(20),
                 reader.IsDBNull(21) ? null : reader.GetString(21),
                 reader.IsDBNull(22) ? null : reader.GetString(22),
-                reader.IsDBNull(23) ? null : reader.GetString(23)));
+                reader.IsDBNull(23) ? null : reader.GetString(23),
+                reader.IsDBNull(24) ? null : reader.GetString(24),
+                reader.IsDBNull(25) ? null : reader.GetString(25),
+                reader.IsDBNull(26) ? null : reader.GetString(26),
+                reader.IsDBNull(27) ? null : reader.GetString(27),
+                reader.IsDBNull(28) ? null : reader.GetString(28),
+                !reader.IsDBNull(29) && Enum.TryParse<ActivityMode>(reader.GetString(29), out var mode) ? mode : null,
+                !reader.IsDBNull(30) && Enum.TryParse<ActivityCategory>(reader.GetString(30), out var category) ? category : null,
+                !reader.IsDBNull(31) && Enum.TryParse<CaptureChange>(reader.GetString(31), out var change) ? change : null,
+                reader.IsDBNull(32) ? null : reader.GetInt64(32),
+                !reader.IsDBNull(33) && reader.GetInt64(33) != 0,
+                !reader.IsDBNull(34) && reader.GetInt64(34) != 0,
+                reader.IsDBNull(35) ? null : reader.GetString(35),
+                reader.IsDBNull(36) ? null : reader.GetString(36)));
         }
 
         return scans;
@@ -1359,6 +1377,8 @@ public interface ICaptureEventStore
             INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
             VALUES (10, CAST(unixepoch('subsec') * 1000 AS INTEGER));
             """);
+
+        ApplyActivityMigrations();
     }
 
     private void EnsureActivitySessionColumn(string columnName)

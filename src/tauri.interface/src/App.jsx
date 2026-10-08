@@ -29,6 +29,9 @@ import {
   glintSearch,
   glintSessions,
   glintSetSessionOutcome,
+  glintActivities,
+  glintSetActivityTask,
+  glintSetAppMode,
   glintImportModel,
   glintStartScanning,
   glintPauseScanning,
@@ -102,6 +105,7 @@ function App() {
   const [setupLog, setSetupLog] = useState([]);
   const [pending, setPending] = useState([]);
   const [sessions, setSessions] = useState([]);
+  const [activities, setActivities] = useState([]);
 
   const safeTheme = sanitizeTheme(theme);
   const windowBg = hexToRgba(safeTheme.bg, safeTheme.bgAlpha);
@@ -173,7 +177,38 @@ function App() {
       .catch(() => {
         // A failed read just leaves the previous list on screen.
       });
+    glintActivities(300)
+      .then((payload) => setActivities(payload?.activities ?? []))
+      .catch(() => {
+        // Same: keep what is shown.
+      });
   }, []);
+
+  // The user's verdict on an activity's task, and their correction of how
+  // an app or site is treated. Both reload so the page shows what was stored.
+  const handleSetActivityTask = useCallback(
+    async (id, status) => {
+      try {
+        await glintSetActivityTask(id, status);
+      } catch {
+        // The next refresh shows the truth.
+      }
+      refreshSessions();
+    },
+    [refreshSessions],
+  );
+
+  const handleSetAppMode = useCallback(
+    async (key, mode) => {
+      try {
+        await glintSetAppMode(key, mode);
+      } catch {
+        // The next refresh shows the truth.
+      }
+      refreshSessions();
+    },
+    [refreshSessions],
+  );
 
   // The user's verdict on a session. Reloads afterwards so the card
   // reflects what was stored rather than an optimistic guess.
@@ -525,6 +560,9 @@ function App() {
             history={history}
             sessions={sessions}
             onSetSessionOutcome={handleSetSessionOutcome}
+            activities={activities}
+            onSetActivityTask={handleSetActivityTask}
+            onSetAppMode={handleSetAppMode}
             pending={pending}
             scanning={scanning}
             busy={busy}

@@ -63,15 +63,23 @@ public sealed class SessionBuilder
     private readonly ISessionWorkStore _store;
     private readonly IActivitySummarizer _summarizer;
     private readonly int _maxSummariesPerRun;
+    private readonly bool _summarizeSessions;
 
+    /// <param name="summarizeSessions">
+    /// False when the activity builder describes sessions instead: one model
+    /// call per activity from that activity's own text, rather than one call
+    /// per session over everything in it.
+    /// </param>
     public SessionBuilder(
         ISessionWorkStore store,
         IActivitySummarizer summarizer,
-        int maxSummariesPerRun = 5)
+        int maxSummariesPerRun = 5,
+        bool summarizeSessions = true)
     {
         _store = store;
         _summarizer = summarizer;
         _maxSummariesPerRun = maxSummariesPerRun;
+        _summarizeSessions = summarizeSessions;
     }
 
     public async Task<SessionBuildResult> RunAsync(
@@ -105,7 +113,10 @@ public sealed class SessionBuilder
         var summarized = 0;
         var failed = 0;
         var minor = 0;
-        foreach (var session in _store.GetUnsummarizedSessions(_maxSummariesPerRun))
+        var unsummarized = _summarizeSessions
+            ? _store.GetUnsummarizedSessions(_maxSummariesPerRun)
+            : [];
+        foreach (var session in unsummarized)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var text = BuildSessionText(_store.GetCaptureTexts(session.ScanIds));

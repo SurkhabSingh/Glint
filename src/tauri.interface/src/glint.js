@@ -58,6 +58,190 @@ export const glintSessions = (limit = 50) =>
   invoke("glint_sessions", { limit });
 export const glintSetSessionOutcome = (id, outcome) =>
   invoke("glint_set_session_outcome", { id, outcome });
+export const glintActivities = (limit = 300) =>
+  invoke("glint_activities", { limit });
+export const glintSetActivityTask = (id, status) =>
+  invoke("glint_set_activity_task", { id, status });
+export const glintSetAppMode = (key, mode) =>
+  invoke("glint_set_app_mode", { key, mode });
+
+// ---------------------------------------------------------------------------
+// Activities: one per thing the user did, separated by app and subject
+// ---------------------------------------------------------------------------
+
+/** How Glint watches each kind of app, in the user's words. */
+export const MODES = {
+  Read: { label: "Read", hint: "Reads the page text and summarizes it" },
+  Make: { label: "Make", hint: "Tracks the file, saves and exports" },
+  Play: { label: "Play", hint: "App and time only, nothing read" },
+  Watch: { label: "Watch", hint: "Title and time, nothing read" },
+  Private: { label: "Private", hint: "Site and time only, no content kept" },
+};
+
+export const MODE_ORDER = ["Read", "Make", "Play", "Watch", "Private"];
+
+/** What each category is called on screen. */
+export const CATEGORY_LABELS = {
+  Other: "Other",
+  Browsing: "Browsing",
+  Email: "Email",
+  Chat: "Chat",
+  Learning: "Study",
+  Video: "Media",
+  Music: "Music",
+  Game: "Gaming",
+  Finance: "Finance",
+  Coding: "Coding",
+  Docs: "Documents",
+  Design: "Design",
+  Photo: "Photo editing",
+  Files: "Files",
+  Assistant: "AI assistant",
+};
+
+export const categoryLabel = (category) =>
+  CATEGORY_LABELS[category] ?? category ?? "";
+
+/** "38 min", "1 h 12 min", "12 s". */
+export function durationText(ms) {
+  const seconds = Math.round(Number(ms) / 1000);
+  if (seconds < 60) return `${Math.max(seconds, 1)} s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+
+/** "2:05 PM" without seconds. */
+export function shortClock(ms) {
+  return new Date(Number(ms)).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+const CHECKS = {
+  Verified: { text: "Checked against the screen", tone: "verified" },
+  Partial: { text: "Partly checked", tone: "partial" },
+  Rule: { text: "From what Glint saw", tone: "rule" },
+  Pending: { text: "Summary after scanning stops", tone: "pending" },
+  Fallback: { text: "No summary could be verified", tone: "fallback" },
+};
+
+function eventText(event) {
+  switch (event.kind) {
+    case "saved":
+      return "Saved";
+    case "saved-as":
+      return "Saved a copy";
+    case "exported":
+      return event.detail ? `Exported (${event.detail})` : "Exported";
+    case "printed":
+      return "Printed";
+    case "rendered":
+      return "Rendered";
+    case "published":
+      return "Published";
+    case "confirmed":
+      return "Confirmation seen";
+    case "interrupted":
+      return `Paused for ${event.detail ?? "something else"}`;
+    default:
+      return event.kind;
+  }
+}
+
+/** Derived display text for one activity. */
+export function activityView(activity) {
+  const check = CHECKS[activity.check] ?? CHECKS.Rule;
+  const appKey = String(activity.key ?? "").split("|")[0] || activity.app;
+  const source = activity.site ? `${activity.app} · ${activity.site}` : activity.app;
+  const dropped = Number(activity.factsDropped ?? 0);
+  return {
+    label: activity.label || activity.subject,
+    summary: activity.summary ?? "",
+    mode: activity.mode,
+    modeLabel: MODES[activity.mode]?.label ?? activity.mode,
+    category: activity.category,
+    categoryLabel: categoryLabel(activity.category),
+    source,
+    span: `${shortClock(activity.startedAtMilliseconds)} – ${shortClock(activity.endedAtMilliseconds)}`,
+    active: durationText(activity.activeMilliseconds),
+    checkText:
+      activity.check === "Partial" && dropped > 0
+        ? `${dropped} unsupported sentence${dropped === 1 ? "" : "s"} removed`
+        : check.text,
+    checkTone: check.tone,
+    phases: activity.phases ?? [],
+    events: (activity.events ?? []).map((event) => ({
+      at: shortClock(event.atMilliseconds),
+      kind: event.kind,
+      text: eventText(event),
+    })),
+    glances: (activity.glances ?? []).map(
+      (glance) =>
+        `${glance.subject || glance.app} · ${durationText(glance.endMilliseconds - glance.startMilliseconds)}`,
+    ),
+    task: activity.task ?? "",
+    taskStatus: activity.taskStatus ?? "None",
+    taskByUser: Boolean(activity.taskSetByUser),
+    // What a mode correction applies to: the site inside a browser, else the app.
+    profileKey: activity.site ? `site:${activity.site}` : `app:${appKey}`,
+    profileName: activity.site ?? activity.app,
+  };
+}
+
+/** Whether an activity overlaps [fromMs, toMs). */
+export function overlaps(activity, fromMs, toMs) {
+  return (
+    activity.startedAtMilliseconds < toMs &&
+    Math.max(activity.endedAtMilliseconds, activity.startedAtMilliseconds + 1) > fromMs
+  );
+}
+
+/**
+ * How an activity sits in a window of time: the part inside it, and whether
+ * it began before or runs past it ("continued from 4:52 PM").
+ */
+export function windowNote(activity, fromMs, toMs) {
+  const inside =
+    Math.min(activity.endedAtMilliseconds, toMs) -
+    Math.max(activity.startedAtMilliseconds, fromMs);
+  const parts = [];
+  if (activity.startedAtMilliseconds < fromMs) {
+    parts.push(`continued from ${shortClock(activity.startedAtMilliseconds)}`);
+  }
+  if (activity.endedAtMilliseconds > toMs) {
+    parts.push(`ran until ${shortClock(activity.endedAtMilliseconds)}`);
+  }
+  if (parts.length > 0 && inside > 0) {
+    parts.push(`${durationText(inside)} in this window`);
+  }
+  return parts.join(" · ");
+}
+
+/** Activities grouped into their sessions, newest session first. */
+export function groupBySession(activities) {
+  const groups = new Map();
+  for (const activity of activities ?? []) {
+    const list = groups.get(activity.sessionId) ?? [];
+    list.push(activity);
+    groups.set(activity.sessionId, list);
+  }
+  return [...groups.entries()]
+    .map(([id, list]) => {
+      const sorted = [...list].sort(
+        (a, b) => a.startedAtMilliseconds - b.startedAtMilliseconds,
+      );
+      return {
+        id,
+        activities: sorted,
+        start: sorted[0].startedAtMilliseconds,
+        end: Math.max(...sorted.map((a) => a.endedAtMilliseconds)),
+        active: sorted.reduce((sum, a) => sum + a.activeMilliseconds, 0),
+      };
+    })
+    .sort((a, b) => b.start - a.start);
+}
 
 // ---------------------------------------------------------------------------
 // View-model ports (mirror ManualScanItemViewModel /
@@ -172,11 +356,19 @@ export function scanView(scan) {
     `${scan.redactions} redactions | capture ${Math.round(scan.captureMilliseconds)} ms | ` +
     `OCR ${Math.round(scan.ocrMilliseconds)} ms` +
     (inference > 0 ? ` | Gemma ${inference} ms` : "");
+  const stored =
+    scan.change === "Delta"
+      ? "Only the new lines were stored"
+      : scan.change === "Presence"
+        ? "Time recorded; no text stored"
+        : scan.change === "Keyframe"
+          ? "Full copy of the page stored"
+          : "Stored locally";
   const status = scan.error
     ? `Capture stored; ${scan.error}`
-    : grouped
-      ? "Stored and grouped into a session"
-      : "Stored locally";
+    : `${scan.mode ? `${scan.mode} · ` : ""}${scan.category ? `${categoryLabel(scan.category)} · ` : ""}${stored}${grouped ? " · grouped into a session" : ""}${
+        scan.eventKind ? ` · ${scan.eventKind}` : ""
+      }`;
   const contextChars =
     scan.gemmaContextCharacters > 0
       ? Number(scan.gemmaContextCharacters).toLocaleString("en-US")

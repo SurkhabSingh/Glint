@@ -1631,3 +1631,373 @@
   font-size: 12px;
   margin-top: 6px;
 }
+
+/* ---------------------------------------------------------------------------
+   Activities: one card per thing the user did. The left edge and the chip
+   carry the mode, so a game, a file being edited and an inbox read apart at
+   a glance on the strip and in the list.
+   --------------------------------------------------------------------------- */
+.mode-Read { --mode-color: #6cb6ff; }
+.mode-Make { --mode-color: #c59bff; }
+.mode-Play { --mode-color: #5fd39b; }
+.mode-Watch { --mode-color: #ff8a4a; }
+.mode-Private { --mode-color: #f5b83d; }
+
+.activity-strip {
+  background: var(--card-bg);
+  border: var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-highlight), var(--card-shadow);
+  margin: 4px 0 8px;
+  padding: 14px 16px 12px;
+}
+
+.activity-strip-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 6px;
+  height: 26px;
+  overflow: hidden;
+  position: relative;
+}
+
+.activity-block {
+  background: var(--mode-color);
+  border-radius: 3px;
+  bottom: 3px;
+  opacity: 0.85;
+  position: absolute;
+  top: 3px;
+}
+
+.activity-block:hover {
+  opacity: 1;
+  outline: 1px solid rgba(255, 255, 255, 0.8);
+}
+
+.activity-strip-axis {
+  color: rgba(255, 255, 255, 0.5);
+  display: flex;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  justify-content: space-between;
+  margin-top: 4px;
+}
+
+.activity-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 8px;
+}
+
+.activity-legend-item {
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 12px;
+}
+
+.activity-legend-item::before {
+  background: var(--mode-color);
+  border-radius: 3px;
+  content: "";
+  display: inline-block;
+  height: 9px;
+  margin-right: 6px;
+  width: 9px;
+}
+
+.activity-groups {
+  display: grid;
+  gap: 18px;
+}
+
+.activity-group-head {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.55);
+  display: flex;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+}
+
+.activity-card {
+  background: var(--card-bg);
+  border: var(--card-border);
+  border-left: 3px solid var(--mode-color);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-highlight), var(--card-shadow);
+  display: grid;
+  gap: 6px;
+  padding: 14px 16px;
+}
+
+.activity-head {
+  color: rgba(255, 255, 255, 0.55);
+  display: flex;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.activity-title-row {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.activity-mode {
+  background: color-mix(in srgb, var(--mode-color) 20%, transparent);
+  border-radius: 999px;
+  color: var(--mode-color);
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 2px 8px;
+  text-transform: uppercase;
+}
+
+.activity-label {
+  font-size: 17px;
+  font-weight: 600;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-text {
+  white-space: pre-wrap;
+}
+
+.chat-text .rich-text {
+  white-space: normal;
+}
+
+.rich-text p {
+  margin: 0 0 8px;
+}
+
+.rich-text p:last-child,
+.rich-text ul:last-child {
+  margin-bottom: 0;
+}
+
+.rich-text ul {
+  margin: 4px 0 10px;
+  padding-left: 20px;
+}
+
+.rich-text li {
+  line-height: 1.55;
+  margin: 2px 0;
+}
+
+.rich-text li ul {
+  list-style: circle;
+  margin: 2px 0 4px;
+}
+
+.chat-meta {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+  margin-top: 6px;
+}
+
+.chat-cite .activity-mode {
+  font-size: 10px;
+  padding: 1px 6px;
+  vertical-align: 1px;
+}
+
+.activity-window-note {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  margin-top: -2px;
+}
+
+.session-activities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 6px;
+}
+
+.session-activity {
+  align-items: baseline;
+  color: rgba(255, 255, 255, 0.78);
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+  min-width: 0;
+}
+
+.session-activity .activity-mode {
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.activity-category {
+  color: rgba(255, 255, 255, 0.5);
+  flex: none;
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.activity-summary {
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.activity-task {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  justify-content: space-between;
+  padding: 8px 10px;
+}
+
+.activity-task.status-Open {
+  background: color-mix(in srgb, var(--accent-color) 14%, transparent);
+}
+
+.activity-task.status-LooksDone {
+  background: rgba(95, 211, 155, 0.12);
+}
+
+.activity-task.status-Done .activity-task-text {
+  color: rgba(255, 255, 255, 0.5);
+  text-decoration: line-through;
+}
+
+.activity-task-text {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.activity-task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.activity-facts {
+  color: rgba(255, 255, 255, 0.72);
+  display: grid;
+  font-size: 13px;
+  gap: 3px;
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+}
+
+.activity-facts li {
+  overflow-wrap: anywhere;
+}
+
+.activity-facts .fact-time {
+  color: rgba(255, 255, 255, 0.42);
+  display: inline-block;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  margin-right: 8px;
+  min-width: 58px;
+}
+
+.activity-facts .fact-confirmed,
+.activity-facts .fact-saved,
+.activity-facts .fact-exported {
+  color: #b9f0d2;
+}
+
+.activity-foot {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 2px;
+}
+
+.activity-source {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.activity-check {
+  border-radius: 999px;
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.activity-check.check-verified {
+  background: rgba(95, 211, 155, 0.14);
+  color: #8fe3b8;
+}
+
+.activity-check.check-partial {
+  background: rgba(245, 184, 61, 0.14);
+  color: #f5c76a;
+}
+
+.activity-check.check-rule,
+.activity-check.check-pending {
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.activity-check.check-fallback {
+  background: rgba(255, 107, 91, 0.14);
+  color: #ff9c90;
+}
+
+.activity-change-mode {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.45);
+  cursor: pointer;
+  font-size: 12px;
+  margin-left: auto;
+  padding: 2px 0;
+  text-decoration: underline dotted;
+}
+
+.activity-change-mode:hover,
+.activity-change-mode:focus-visible {
+  color: #fff;
+}
+
+.activity-mode-picker {
+  align-items: center;
+  color: rgba(255, 255, 255, 0.65);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 12px;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.activity-mode-picker select {
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  color: #fff;
+  font: inherit;
+  padding: 3px 6px;
+}
+
+.timeline-activities {
+  margin-bottom: 14px;
+}
+
+.timeline-activities > summary {
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  font-size: 13px;
+  margin-bottom: 8px;
+}

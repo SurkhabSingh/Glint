@@ -22,7 +22,13 @@ public sealed record ForegroundWindowInfo(
     bool IsDisplayProtected,
     bool IsSecureDesktop,
     bool DesktopStateDetermined,
-    bool IsSelf);
+    bool IsSelf,
+    // Set when the foreground window was a dialog, menu or pop-up owned by
+    // this window: its title ("Export As", "Save As") marks an event inside
+    // the owner's activity instead of starting a new one.
+    string? DialogTitle = null,
+    // The window covers its whole monitor: games and video, usually.
+    bool IsFullscreen = false);
 
 public sealed record AutomationSecurityProbe(
     bool Determined,

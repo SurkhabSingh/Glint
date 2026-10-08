@@ -7,7 +7,13 @@ public sealed record CaptureRow(
     string Id,
     long CapturedAtMilliseconds,
     string ProcessName,
-    string WindowTitle);
+    string WindowTitle,
+    long? LastSeenMilliseconds = null)
+{
+    /// When the record last saw its window: a game or video is one record
+    /// extended for as long as it stays in front.
+    public long EndMilliseconds => Math.Max(CapturedAtMilliseconds, LastSeenMilliseconds ?? CapturedAtMilliseconds);
+}
 
 /// Evidence that the user stepped away or that recording stopped. Kinds are
 /// `user.away`, `user.returned`, `run.started` and `run.stopped`.
@@ -110,7 +116,7 @@ public static class Sessionizer
 
         foreach (var capture in ordered.Skip(1))
         {
-            var previous = current[^1].CapturedAtMilliseconds;
+            var previous = current.Max(row => row.EndMilliseconds);
             var gap = capture.CapturedAtMilliseconds - previous;
             var explained = gap >= IdleGapMilliseconds
                 && breaks.Any(at => at > previous && at < capture.CapturedAtMilliseconds);
@@ -134,7 +140,7 @@ public static class Sessionizer
         // The last group is the only one that can still be growing: every
         // earlier group is already followed by a boundary.
         var last = groups[^1];
-        if (nowMilliseconds - last[^1].CapturedAtMilliseconds < QuietTailMilliseconds)
+        if (nowMilliseconds - last.Max(row => row.EndMilliseconds) < QuietTailMilliseconds)
         {
             groups.RemoveAt(groups.Count - 1);
         }
@@ -149,7 +155,7 @@ public static class Sessionizer
     /// </summary>
     private static IEnumerable<List<CaptureRow>> SplitToCap(List<CaptureRow> group)
     {
-        var span = group[^1].CapturedAtMilliseconds - group[0].CapturedAtMilliseconds;
+        var span = group.Max(row => row.EndMilliseconds) - group[0].CapturedAtMilliseconds;
         if (span <= MaxSessionMilliseconds || group.Count < 2)
         {
             yield return group;
@@ -162,7 +168,7 @@ public static class Sessionizer
         for (var index = 1; index < group.Count; index++)
         {
             var gap = group[index].CapturedAtMilliseconds
-                - group[index - 1].CapturedAtMilliseconds;
+                - group[index - 1].EndMilliseconds;
             // Ties favour the middle, so an evenly paced stretch halves rather
             // than shedding one capture at a time.
             var closerToMiddle = Math.Abs(index - middle) < Math.Abs(splitIndex - middle);
@@ -187,7 +193,7 @@ public static class Sessionizer
     private static SessionDraft ToDraft(List<CaptureRow> group) =>
         new(
             group[0].CapturedAtMilliseconds,
-            group[^1].CapturedAtMilliseconds,
+            group.Max(row => row.EndMilliseconds),
             Dominant(group.Select(capture => capture.ProcessName)),
             Dominant(group.Select(capture => capture.WindowTitle)),
             group.Select(capture => capture.Id).ToList());

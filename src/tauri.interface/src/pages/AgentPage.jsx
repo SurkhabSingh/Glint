@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import RichText from "../components/RichText";
 import {
   formatClock,
   formatTimestamp,
@@ -8,6 +9,9 @@ import {
   glintChatRename,
   glintChatThread,
   glintChatThreads,
+  categoryLabel,
+  durationText,
+  shortClock,
 } from "../glint";
 
 function todayKey() {
@@ -218,6 +222,8 @@ function AgentPage() {
           text: response.answer,
           citations: response.citations ?? [],
           scopedCount: response.scopedCount,
+          period: response.kind === "activity" ? response.period : null,
+          removed: response.removed ?? 0,
           at: Date.now(),
         },
       ]);
@@ -438,22 +444,58 @@ function AgentPage() {
                 <div className="chat-list">
                   {messages.map((msg, i) => (
                     <div key={i} className={`chat-msg ${msg.role}`}>
-                      <div className="chat-text">{msg.text}</div>
+                      <div className="chat-text">
+                        {msg.role === "agent" ? <RichText text={msg.text} /> : msg.text}
+                      </div>
+                      {(msg.period || msg.removed > 0) && (
+                        <div className="chat-meta">
+                          {msg.period
+                            ? msg.period === "all recorded time"
+                              ? "Across everything recorded so far"
+                              : `About ${msg.period}`
+                            : ""}
+                          {msg.period && msg.removed > 0 ? " · " : ""}
+                          {msg.removed > 0
+                            ? `${msg.removed} unsupported sentence${msg.removed === 1 ? "" : "s"} removed`
+                            : ""}
+                        </div>
+                      )}
                       {msg.citations && msg.citations.length > 0 && (
                         <details className="chat-citations" close>
                           <summary className="chat-cite-head">
-                            Based on {msg.citations.length} scan
-                            {msg.citations.length === 1 ? "" : "s"}
+                            Based on {msg.citations.length}{" "}
+                            {msg.citations[0].mode ? "activit" : "scan"}
+                            {msg.citations[0].mode
+                              ? msg.citations.length === 1
+                                ? "y"
+                                : "ies"
+                              : msg.citations.length === 1
+                                ? ""
+                                : "s"}
                           </summary>
-                          {msg.citations.map((cite) => (
-                            <div className="chat-cite" key={cite.id ?? cite.label}>
-                              <strong>{cite.label}</strong>
-                              <span>
-                                {cite.processName} ·{" "}
-                                {formatTimestamp(cite.capturedAtMilliseconds)}
-                              </span>
-                            </div>
-                          ))}
+                          {msg.citations.map((cite) =>
+                            cite.mode ? (
+                              <div className="chat-cite" key={cite.id ?? cite.number}>
+                                <strong>
+                                  <span className={`activity-mode mode-${cite.mode}`}>{cite.mode}</span>{" "}
+                                  {cite.label}
+                                </strong>
+                                <span>
+                                  {categoryLabel(cite.category)} · {cite.site ?? cite.app} ·{" "}
+                                  {shortClock(cite.startedAtMilliseconds)}–{shortClock(cite.endedAtMilliseconds)} ·{" "}
+                                  {durationText(cite.activeMilliseconds)}
+                                </span>
+                              </div>
+                            ) : (
+                              <div className="chat-cite" key={cite.id ?? cite.label}>
+                                <strong>{cite.label}</strong>
+                                <span>
+                                  {cite.processName} ·{" "}
+                                  {formatTimestamp(cite.capturedAtMilliseconds)}
+                                </span>
+                              </div>
+                            ),
+                          )}
                         </details>
                       )}
                       {msg.at != null && (

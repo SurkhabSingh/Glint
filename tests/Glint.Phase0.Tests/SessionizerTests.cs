@@ -298,4 +298,35 @@ public sealed class SessionizerTests
         Assert.Contains(new string('a', 500), built, StringComparison.Ordinal);
         Assert.DoesNotContain(new string('b', 500), built, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void ARecordExtendedByWatchingCountsUntilItWasLastSeen()
+    {
+        // One video record from 0 to 20 minutes, then a new capture at 22:
+        // the gap is two minutes, not twenty-two, so an away marker in it
+        // cannot split them, and the session ends when the record was last seen.
+        const long minute = 60_000;
+        var captures = new List<CaptureRow>
+        {
+            new("video", 0, "zen", "Episode 3", 20 * minute),
+            new("chat", 22 * minute, "Discord", "@Sam", 24 * minute)
+        };
+
+        var drafts = Sessionizer.Cluster(
+            captures,
+            60 * minute,
+            [new ActivityMarker(21 * minute, "user.away")]);
+
+        var session = Assert.Single(drafts);
+        Assert.Equal(24 * minute, session.EndedAtMilliseconds);
+    }
+
+    [Fact]
+    public void AStillWatchedRecordIsNotSealedEarly()
+    {
+        const long minute = 60_000;
+        var captures = new List<CaptureRow> { new("video", 0, "zen", "Episode 3", 30 * minute) };
+
+        Assert.Empty(Sessionizer.Cluster(captures, (30 * minute) + 30_000));
+    }
 }

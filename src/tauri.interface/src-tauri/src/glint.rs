@@ -5,7 +5,6 @@
 //! `Glint.Phase0.Cli` sidecar — see `bridge.rs` for the transport.
 //! All user-facing strings mirror the WinUI view model verbatim.
 
-use chrono::TimeZone;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -81,82 +80,6 @@ fn overall_info(message: String) -> serde_json::Value {
         "message": message,
         "severity": "info",
     })
-}
-
-/// Append a failure fingerprint for post-mortem diagnosis
-/// (data_root/ask-failures.log): prompt hash + sizes + worker stderr head.
-/// Never includes prompt text or captured content.
-fn log_ask_failure(question: &str, prompt_chars: usize, scoped_count: usize, detail: &str) {
-    let line = serde_json::json!({
-        "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-        "question_chars": question.chars().count(),
-        "prompt_chars": prompt_chars,
-        "scoped_count": scoped_count,
-        "detail": detail.chars().take(500).collect::<String>(),
-    });
-    if let Ok(root) = crate::bridge::data_root() {
-        let path = root.join("ask-failures.log");
-        use std::io::Write;
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            let _ = writeln!(
-                file,
-                "{}",
-                serde_json::to_string(&line).unwrap_or_default()
-            );
-        }
-    }
-}
-
-/// Wording for the selected scope, so a week or all-history answer is not
-/// narrated as "today".
-fn scope_phrases(scope: &str) -> (&'static str, &'static str) {
-    match scope {
-        "week" => ("this week", "Here's what you did this week~!"),
-        "all" => ("across your history", "Here's what you've been up to~!"),
-        _ => ("today", "Here's what you did today~!"),
-    }
-}
-
-/// Whether a second worker could plausibly succeed. Deterministic failures
-/// fail the same way twice, and each retry costs a process spawn plus a full
-/// ~2.5 GB model load, so they are not worth repeating.
-fn is_retryable(stderr: &str) -> bool {
-    let raw = stderr.to_ascii_lowercase();
-    let deterministic = [
-        "prompt too large",
-        "prompt cannot be empty",
-        "runtime is not ready",
-    ];
-    !deterministic.iter().any(|needle| raw.contains(needle))
-}
-
-/// Translate raw worker/sidecar stderr into something actionable while
-/// keeping the technical detail for diagnosis (capped in length).
-fn friendly_model_error(stderr: &str) -> String {
-    let raw = stderr.trim();
-    if raw.is_empty() {
-        return "The local model produced no output.".to_string();
-    }
-    let transient = raw.contains("litert_lm_conversation_send_message failed")
-        || raw.contains("LiteRT-LM worker exited")
-        || raw.contains("did not deliver")
-        || raw.contains("timed out")
-        || raw.contains("Timeout");
-    let mut detail: String = raw.chars().take(500).collect();
-    if detail.len() < raw.len() {
-        detail.push('…');
-    }
-    if transient {
-        format!(
-            "The local model stumbled (worker error, usually transient — asked again automatically). If this persists, stop scanning and retry. Technical detail: {detail}"
-        )
-    } else {
-        detail
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -624,6 +547,82 @@ pub fn glint_sessions(app: AppHandle, limit: Option<u32>) -> Result<serde_json::
     Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
 }
 
+/// Activities, newest first: one per thing the user did, each with its own
+/// mode, time, events and checked summary.
+#[tauri::command(async)]
+pub fn glint_activities(app: AppHandle, limit: Option<u32>) -> Result<serde_json::Value, String> {
+    let root = crate::bridge::data_root()?;
+    let requested = limit.unwrap_or(300).clamp(1, 1000).to_string();
+    let mut args = vec!["activities".to_string(), "--limit".to_string(), requested];
+    args.extend(crate::bridge::db_args(&app, &root));
+    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
+    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+}
+
+/// The user's verdict on an activity's task. Absolute: no rule rewrites it.
+#[tauri::command(async)]
+pub fn glint_set_activity_task(
+    app: AppHandle,
+    id: String,
+    status: String,
+) -> Result<serde_json::Value, String> {
+    if !matches!(status.as_str(), "Open" | "LooksDone" | "Done" | "None") {
+        return Err(format!("Unknown task status: {status}"));
+    }
+    let root = crate::bridge::data_root()?;
+    let mut args = vec![
+        "activity-task".to_string(),
+        "--id".to_string(),
+        id,
+        "--status".to_string(),
+        status,
+    ];
+    args.extend(crate::bridge::db_args(&app, &root));
+    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
+    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+}
+
+/// The user's correction of how an app or site is treated. Rebuilds the
+/// activity view so the correction shows on the timeline straight away.
+#[tauri::command(async)]
+pub async fn glint_set_app_mode(
+    app: AppHandle,
+    key: String,
+    mode: String,
+) -> Result<serde_json::Value, String> {
+    if !(key.starts_with("app:") || key.starts_with("site:")) {
+        return Err("The key must name an app or a site.".to_string());
+    }
+    if !matches!(mode.as_str(), "Read" | "Make" | "Play" | "Watch" | "Private") {
+        return Err(format!("Unknown mode: {mode}"));
+    }
+    let root = crate::bridge::data_root()?;
+    let mut args = vec![
+        "app-mode".to_string(),
+        "--key".to_string(),
+        key,
+        "--mode".to_string(),
+        mode,
+    ];
+    args.extend(crate::bridge::db_args(&app, &root));
+    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
+    let profile = crate::bridge::run_sidecar_async(&app, &arg_refs).await?.json;
+    // Re-segment without waiting for the next stop; descriptions already
+    // written are kept, so this costs no model call.
+    let scanning = app
+        .state::<ScanRuntime>()
+        .state
+        .lock()
+        .map(|state| state.scanning)
+        .unwrap_or(false);
+    if !scanning {
+        if let Some(result) = run_sessionize(&app, false).await {
+            let _ = app.emit("sessions-updated", &result);
+        }
+    }
+    Ok(profile)
+}
+
 /// Record that the user went away or came back, or that recording started or
 /// stopped. The sessionizer reads these to tell a real break from a screen
 /// that simply did not change. Best effort: a lost marker only costs the
@@ -646,6 +645,11 @@ async fn run_sessionize(app: &AppHandle, seal_open: bool) -> Option<serde_json::
     let root = crate::bridge::data_root().ok()?;
     let cli = crate::bridge::sidecar_path(app).ok()?;
     let mut args = vec!["sessionize".to_string()];
+    if !seal_open {
+        // A rebuild after a correction: segment only, no model calls.
+        args.push("--max-summaries".to_string());
+        args.push("0".to_string());
+    }
     args.extend(crate::bridge::db_args(app, &root));
     args.extend(crate::bridge::host_args());
     if seal_open {
@@ -776,6 +780,11 @@ async fn scan_loop(app: AppHandle, generation: u64) {
     let mut last_title: Option<String> = None;
     let mut pending_title: Option<(String, Instant)> = None;
     let mut away = false;
+    // A game or video whose screen was moving at the last look keeps the
+    // user "present" without input, until a look says otherwise.
+    let mut watching_until: Option<Instant> = None;
+    // The last look was a game or a video.
+    let mut visual_foreground = false;
 
     loop {
         if !is_current(&app, generation) {
@@ -837,6 +846,8 @@ async fn scan_loop(app: AppHandle, generation: u64) {
             since_foreground_change_ms: foreground_changed_at
                 .map(|at| at.elapsed().as_millis() as u64),
             on_battery: cadence::on_battery(),
+            screen_active: watching_until.is_some_and(|until| Instant::now() < until),
+            visual_foreground,
         });
 
         let wait_ms = match decision {
@@ -883,6 +894,20 @@ async fn scan_loop(app: AppHandle, generation: u64) {
                 match run_manual_scan(&app, generation).await {
                     None => break, // paused or superseded
                     Some(outcome) => {
+                        let mode = outcome.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+                        let moving = outcome
+                            .get("screenMoving")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        visual_foreground = matches!(mode, "Play" | "Watch");
+                        watching_until = if matches!(mode, "Play" | "Watch") && moving {
+                            Some(
+                                Instant::now()
+                                    + std::time::Duration::from_millis(cadence::PASSIVE_INTERVAL_MS * 2),
+                            )
+                        } else {
+                            None
+                        };
                         let payload = outcome_payload(&outcome, Some(tick_id));
                         let _ = app.emit("scan-outcome", &payload);
                     }
@@ -1542,17 +1567,15 @@ pub fn glint_show_main(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Ask the local agent over captured history (Agent tab).
-/// scope: "day" (needs `day` YYYY-MM-DD, default today), "week", "all".
-/// Built purely from existing verbs: runtime-status, manual-history,
-/// model-generate. Citations are the scans actually placed in context —
-/// never model-invented references.
+/// Ask: the user's question goes to the long-lived answer process
+/// (`ask-serve`), which reads their activities, works out the period and the
+/// kind of activity, writes summaries from the facts, uses the local model
+/// for everything else, and checks the model's answer against the log.
 ///
-/// `thread_id` threads the conversation: previous turns travel with the ask
-/// (so follow-ups and corrections land on the same evidence), and this ask's
-/// question + answer are appended to the thread. Follows-ups sample instead
-/// of running deterministically, or a correction could never change the
-/// answer. Thread failures are non-fatal: the ask proceeds unthreaded.
+/// The process keeps the model loaded between questions, so only the first
+/// one pays for loading it. Questions and history travel over its stdin,
+/// never on a command line. `thread_id` threads the conversation: recent
+/// turns go with the question, and the question and answer are stored.
 #[tauri::command]
 pub async fn glint_ask(
     app: AppHandle,
@@ -1563,7 +1586,7 @@ pub async fn glint_ask(
 ) -> Result<serde_json::Value, String> {
     let question = question.trim().to_string();
     if question.is_empty() {
-        return Err("Ask a question about your captured context.".to_string());
+        return Err("Type a question or a message.".to_string());
     }
     let thread_id = thread_id
         .as_deref()
@@ -1571,399 +1594,165 @@ pub async fn glint_ask(
         .filter(|id| !id.is_empty())
         .map(str::to_string);
 
-    // 1. Resolve the LiteRT runtime (paths for model-generate).
-    let resolution = crate::bridge::run_sidecar_async(&app, &["runtime-status"])
-        .await
-        .map_err(|e| format!("Gemma runtime check failed: {e}"))?
-        .json;
-    let (ready_summary, ready) = runtime_port(&resolution);
-    if !ready {
-        return Err(ready_summary);
-    }
-    let python = resolution
-        .get("pythonExecutable")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let worker = resolution
-        .get("workerScript")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let model = resolution
-        .get("modelPath")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    // 1b. Thread history (best effort) + persist the question. History holds
-    // previous turns only; the current question is appended first so a crash
-    // mid-generation still leaves a truthful thread.
-    let history_text = match &thread_id {
-        Some(id) => load_thread_history(&app, id).await,
-        None => String::new(),
+    // Previous turns first, then the question is stored, so a crash during
+    // the answer still leaves a truthful thread.
+    let history = match &thread_id {
+        Some(id) => load_thread_turns(&app, id).await,
+        None => Vec::new(),
     };
     if let Some(id) = &thread_id {
         append_chat(&app, id, "user", &question, None, None).await;
     }
 
-    // 2. Pull scan records and filter by scope.
-    let root = crate::bridge::data_root()?;
-    let db_args = crate::bridge::db_args(&app, &root);
-    let mut args = vec!["manual-history", "--limit", "500"];
-    args.extend(db_args.iter().map(|s| s.as_str()));
-    let scans = crate::bridge::run_sidecar_async(&app, &args)
-        .await
-        .map(|out| {
-            out.json
-                .get("scans")
-                .cloned()
-                .unwrap_or(serde_json::Value::Array(vec![]))
-        })
-        .unwrap_or(serde_json::Value::Array(vec![]));
-    let all_scans: Vec<&serde_json::Value> = scans.as_array().map(|a| a.iter().collect()).unwrap_or_default();
+    let request = serde_json::json!({
+        "question": question,
+        "scope": scope,
+        "day": day.filter(|d| !d.trim().is_empty()),
+        "history": history,
+    });
 
-    let day_key = day
-        .filter(|d| !d.trim().is_empty())
-        .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d").to_string());
-    let local_day_of = |ms: i64| -> String {
-        chrono::DateTime::from_timestamp_millis(ms)
-            .map(|utc| {
-                chrono::Local
-                    .from_utc_datetime(&utc.naive_utc())
-                    .format("%Y-%m-%d")
-                    .to_string()
-            })
-            .unwrap_or_default()
-    };
-    let in_scope = |scan: &serde_json::Value| -> bool {
-        let ms = scan
-            .get("capturedAtMilliseconds")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        match scope.as_str() {
-            "week" => {
-                let today = chrono::Local::now().date_naive();
-                chrono::NaiveDate::parse_from_str(&local_day_of(ms), "%Y-%m-%d")
-                    .map(|d| (0..=6).contains(&(today - d).num_days()))
-                    .unwrap_or(false)
-            }
-            "all" => true,
-            _ => local_day_of(ms) == day_key,
-        }
-    };
-    let scoped: Vec<&serde_json::Value> =
-        all_scans.iter().filter(|s| in_scope(s)).copied().collect();
-    if scoped.is_empty() {
-        return Ok(serde_json::json!({
-            "answer": "I couldn't find enough evidence in the selected scope. Try a wider scope or different wording.",
-            "citations": [],
-            "scopedCount": 0,
-            "totalCount": all_scans.len(),
-        }));
-    }
-
-    // 3. Build a budgeted context from SESSION blocks (not raw scans):
-    // consecutive same-session scans merge into one entry carrying its
-    // span + duration, so the model narrates activities ("played X for
-    // 5 mins") instead of data-dumping scans. Hard cap ~3.5k chars: the
-    // worker rejects inputs past ~1.9k tokens within milliseconds, and
-    // token-dense content needs the margin. Deterministic pass > retry.
-    fn clock(ms: i64) -> String {
-        chrono::DateTime::from_timestamp_millis(ms)
-            .map(|utc| {
-                chrono::Local
-                    .from_utc_datetime(&utc.naive_utc())
-                    .format("%-I:%M %p")
-                    .to_string()
-            })
-            .unwrap_or_default()
-    }
-    fn duration(ms: i64) -> String {
-        if ms < 60_000 {
-            "under a minute".to_string()
-        } else if ms < 3_600_000 {
-            format!("about {} mins", ms / 60_000)
-        } else {
-            format!(
-                "about {} hrs {} mins",
-                ms / 3_600_000,
-                (ms % 3_600_000) / 60_000
-            )
-        }
-    }
-    const CONTEXT_BUDGET: usize = 3_500;
-    // History shares the worker's input budget with the session evidence:
-    // shrink the session side by whatever history takes, so the total prompt
-    // stays within the token limit history or not.
-    let session_budget = CONTEXT_BUDGET.saturating_sub(history_text.len());
-    let mut context = String::new();
-    let mut cited = Vec::new();
-    let mut index = 0usize;
-    // Sessions are time-contiguous, so same-session scans are always
-    // adjacent: extend each block while the session id holds.
-    let mut i = 0;
-    while i < scoped.len() {
-        let mut j = i + 1;
-        while j < scoped.len() {
-            let a = scoped[i].get("sessionId").and_then(|v| v.as_str());
-            let b = scoped[j].get("sessionId").and_then(|v| v.as_str());
-            match (a, b) {
-                (Some(x), Some(y)) if x == y => j += 1,
-                _ => break,
-            }
-        }
-        let block = &scoped[i..j];
-        i = j;
-        let times: Vec<i64> = block
-            .iter()
-            .map(|s| {
-                s.get("capturedAtMilliseconds")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0)
-            })
-            .collect();
-        let start = times.iter().copied().min().unwrap_or(0);
-        let end = times.iter().copied().max().unwrap_or(0);
-        let head = block[0];
-        let process = head
-            .get("processName")
-            .and_then(|v| v.as_str())
-            .unwrap_or("?");
-        let label = block
-            .iter()
-            .filter_map(|s| s.get("label").and_then(|v| v.as_str()))
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("Untitled activity");
-        let mut notes: Vec<&str> = Vec::new();
-        for scan in block {
-            if let Some(summary) = scan.get("summary").and_then(|v| v.as_str()) {
-                let trimmed = summary.trim();
-                if !trimmed.is_empty() && !notes.contains(&trimmed) {
-                    notes.push(trimmed);
-                }
-            }
-            if notes.len() >= 2 {
-                break;
-            }
-        }
-        let mut key = String::new();
-        for scan in block {
-            for field in ["importantSignals", "reminderCandidate"] {
-                if let Some(text) = scan.get(field).and_then(|v| v.as_str()) {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() && !key.contains(trimmed) {
-                        if !key.is_empty() {
-                            key.push_str("; ");
-                        }
-                        key.push_str(trimmed);
-                    }
-                }
-            }
-            if key.len() > 300 {
-                break;
-            }
-        }
-        let entry = format!(
-            "[{index}] {label} ({process}) — {dur} ({range})\nWhat happened: {notes}\nKey: {key}\n",
-            dur = duration(end - start),
-            range = format!("{}–{}", clock(start), clock(end)),
-            notes = if notes.is_empty() {
-                "no summary recorded".to_string()
-            } else {
-                notes.join(" / ")
-            },
-            key = if key.is_empty() { "-".to_string() } else { key },
-        );
-        if context.len() + entry.len() > session_budget {
-            break;
-        }
-        context.push_str(&entry);
-        for scan in block {
-            if cited.len() >= 12 {
-                break;
-            }
-            cited.push(serde_json::json!({
-                "id": scan.get("id"),
-                "label": scan.get("label").and_then(|v| v.as_str()).unwrap_or("Untitled"),
-                "capturedAtMilliseconds": scan.get("capturedAtMilliseconds").and_then(|v| v.as_i64()).unwrap_or(0),
-                "processName": scan.get("processName").and_then(|v| v.as_str()).unwrap_or("?"),
-            }));
-        }
-        index += 1;
-    }
-
-    let (period, opener) = scope_phrases(&scope);
-    let history_section = if history_text.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\n\nConversation so far (most recent last):\n{history_text}\n\n\
-             The user may be correcting or disputing the previous answer. If so, \
-             re-derive the disputed claims from the sessions below, state what \
-             changed and why, and never restate a disputed claim without citing \
-             the evidence for it."
-        )
-    };
-    let prompt = build_ask_prompt(&period, &opener, &question, &context, &history_section);
-
-    // 4. Generate via the existing model-generate verb (5 min cap inside).
-    // Serialized with scan ticks (one model load at a time). Transient
-    // native worker failures (RAM contention from an overlapping load, AV
-    // holds, cold-start races) are retried once; deterministic ones are not.
+    // One model at a time: the answer process shares the machine with the
+    // sessionizer's summaries.
     let model_state: State<ScanRuntime> = app.state();
     let _model = model_state.model_lock.lock().await;
-    let mut last_error = "The local model produced no output.".to_string();
-    let mut generated: Option<serde_json::Value> = None;
-    for attempt in 0..2 {
-        let mut args = vec![
-            "model-generate".to_string(),
-            "--python".to_string(),
-            python.clone(),
-            "--worker".to_string(),
-            worker.clone(),
-            "--model".to_string(),
-            model.clone(),
-            "--backend".to_string(),
-            "cpu".to_string(),
-            // model-generate defaults to 2048, which caps input + output
-            // together; the summarizer already runs 4096 on this hardware.
-            "--max-tokens".to_string(),
-            "4096".to_string(),
-            "--prompt".to_string(),
-            prompt.clone(),
-        ];
-        // First answers stay deterministic (temp 0, seed 1) so the same
-        // question repeats stably. Follow-ups with history sample instead:
-        // temp 0 plus a fixed seed would regurgitate the previous answer no
-        // matter what the correction said.
-        if history_text.is_empty() {
-            args.push("--temperature".to_string());
-            args.push("0".to_string());
-            args.push("--seed".to_string());
-            args.push("1".to_string());
-        } else {
-            args.push("--temperature".to_string());
-            args.push("0.7".to_string());
-        }
-        let blocking_app = app.clone();
-        let started = std::time::Instant::now();
-        let output = tokio::task::spawn_blocking(move || {
-            let cli = crate::bridge::sidecar_path(&blocking_app)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
-            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            crate::bridge::hidden_command(&cli).args(&arg_refs).output()
-        })
-        .await
-        .map_err(|error| format!("Agent task failed: {error}"))?
-        .map_err(|error| format!("Agent failed to launch: {error}"))?;
-        crate::bridge::record_spawn(
-            "model-generate",
-            started.elapsed().as_millis(),
-            output.status.code().unwrap_or(-1),
-            None,
-        );
-        match serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&output.stdout)) {
-            Ok(value) => {
-                generated = Some(value);
-                break;
+    let reply = ask_server_request(&app, &request).await;
+    drop(_model);
+
+    match reply {
+        Ok(answer) => {
+            if let Some(id) = &thread_id {
+                let text = answer.get("answer").and_then(|v| v.as_str()).unwrap_or("");
+                let citations = answer
+                    .get("citations")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "[]".to_string());
+                let scoped = answer
+                    .get("scopedCount")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize);
+                append_chat(&app, id, "agent", text, Some(citations), scoped).await;
             }
-            Err(_) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                last_error = friendly_model_error(&stderr);
-                // A deterministic failure repeats, so skip the second
-                // spawn and its full model load.
-                if attempt == 0 && !is_retryable(&stderr) {
-                    break;
+            Ok(answer)
+        }
+        Err(error) => {
+            if let Some(id) = &thread_id {
+                append_chat(&app, id, "error", &error, None, None).await;
+            }
+            Err(error)
+        }
+    }
+}
+
+/// The running answer process, if any.
+#[derive(Default)]
+pub struct AskServer {
+    process: tokio::sync::Mutex<Option<AskProcess>>,
+}
+
+struct AskProcess {
+    child: tokio::process::Child,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+}
+
+fn spawn_ask_server(app: &AppHandle) -> Result<AskProcess, String> {
+    use tokio::io::AsyncBufReadExt;
+    let root = crate::bridge::data_root()?;
+    let cli = crate::bridge::sidecar_path(app)?;
+    let mut args = vec!["ask-serve".to_string()];
+    args.extend(crate::bridge::db_args(app, &root));
+    let mut child = tokio::process::Command::new(&cli)
+        .args(&args)
+        .creation_flags(crate::bridge::CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| format!("Could not start the answer process: {error}"))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "The answer process has no input.".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "The answer process has no output.".to_string())?;
+    Ok(AskProcess {
+        child,
+        stdin,
+        stdout: tokio::io::BufReader::new(stdout).lines(),
+    })
+}
+
+/// Sends one request and waits for its answer. A process that has exited
+/// (idle shutdown, crash) is replaced once, transparently.
+async fn ask_server_request(
+    app: &AppHandle,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use tokio::io::AsyncWriteExt;
+    let server: State<AskServer> = app.state();
+    let mut guard = server.process.lock().await;
+    let line = format!("{request}\n");
+    for _ in 0..2 {
+        if guard.is_none() {
+            *guard = Some(spawn_ask_server(app)?);
+        }
+        let process = guard.as_mut().expect("just set");
+        let sent = async {
+            process.stdin.write_all(line.as_bytes()).await?;
+            process.stdin.flush().await
+        }
+        .await;
+        if sent.is_ok() {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                process.stdout.next_line(),
+            )
+            .await
+            {
+                Ok(Ok(Some(reply))) => return parse_ask_reply(&reply),
+                Ok(_) => {}
+                Err(_) => {
+                    if let Some(mut stuck) = guard.take() {
+                        let _ = stuck.child.kill().await;
+                    }
+                    return Err("The local model took too long to answer. Try again.".to_string());
                 }
             }
         }
-    }
-    let generated = match generated {
-        Some(value) => value,
-        None => {
-            log_ask_failure(&question, prompt.len(), scoped.len(), &last_error);
-            if let Some(id) = &thread_id {
-                append_chat(&app, id, "error", &last_error, None, None).await;
-            }
-            return Err(last_error);
+        // The process is gone: clear it and start a fresh one.
+        if let Some(mut dead) = guard.take() {
+            let _ = dead.child.kill().await;
         }
+    }
+    Err("The answer process stopped unexpectedly. Try again.".to_string())
+}
+
+/// One line from the answer process: an answer, or an error to show.
+fn parse_ask_reply(line: &str) -> Result<serde_json::Value, String> {
+    let value: serde_json::Value = serde_json::from_str(line)
+        .map_err(|_| "The answer process returned something unreadable.".to_string())?;
+    match value.get("error").and_then(|v| v.as_str()) {
+        Some(error) => Err(error.to_string()),
+        None => Ok(value),
+    }
+}
+
+/// The last turns of a thread, oldest first, as the answer process takes
+/// them. Best effort: any failure means no history.
+async fn load_thread_turns(app: &AppHandle, thread_id: &str) -> Vec<serde_json::Value> {
+    let Ok(root) = crate::bridge::data_root() else {
+        return Vec::new();
     };
-    let answer = generated
-        .get("text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if answer.is_empty() {
-        if let Some(id) = &thread_id {
-            append_chat(&app, id, "error", "The local model produced no answer.", None, None).await;
-        }
-        return Err("The local model produced no answer.".to_string());
-    }
-    if let Some(id) = &thread_id {
-        let citations_json = serde_json::to_string(&cited).unwrap_or_else(|_| "[]".to_string());
-        append_chat(&app, id, "agent", &answer, Some(citations_json), Some(scoped.len())).await;
-    }
-    Ok(serde_json::json!({
-        "answer": answer,
-        "citations": cited,
-        "scopedCount": scoped.len(),
-        "totalCount": all_scans.len(),
-    }))
-}
-
-/// The full ask prompt, pure for tests. Glint talks like a normal chatbot
-/// that happens to remember the user's screen: warm, direct, a few
-/// sentences, structure only when the message calls for it. There is no
-/// mandatory narration, no forced Summary section, no obligatory durations —
-/// that rigidity is what made every greeting come back as a robot report.
-/// Conversation turns are quarantined from evidence: [n] citations may only
-/// point at the numbered sessions, never at a previous assistant turn.
-fn build_ask_prompt(
-    period: &str,
-    _opener: &str,
-    question: &str,
-    context: &str,
-    history_section: &str,
-) -> String {
-    format!(
-        "You are Glint, a friendly local assistant with a memory of the user's captured \
-         on-screen activity {period}. Talk like a normal chatbot: warm, direct, a few \
-         sentences. Answer the user's actual message — a greeting gets a greeting, a \
-         question gets an answer, a correction gets a revised answer that states what \
-         changed and why. Structure (lists, headings) only when it genuinely helps; \
-         never force a Summary section or bullet list onto a message that does not ask \
-         for one. You have the user's activity log below as numbered sessions ([n]). \
-         Use it whenever the message is about what they did, and put a [n] citation \
-         right after any fact it supports. Never invent activities, people, times, or \
-         durations that are not in the sessions or conversation above. If the evidence \
-         is thin, say what you know briefly and offer to look wider. Describe what \
-         happened; prefer times of day over durations. Only state how long something \
-         took if asked, and then give it as a wall-clock span, never as engaged time. \
-         Order oldest-first (entries are listed newest-first, so reorder); merge \
-         trivial repeats silently. Conversation turns above are NOT evidence: [n] \
-         citations may only point at the numbered sessions below, never at a previous \
-         assistant turn.{history_section}\n\nQuestion: {question}\n\nSessions (newest first):\n{context}"
-    )
-}
-
-/// Previous turns of a chat thread, oldest first, capped so the session
-/// evidence keeps budget priority. Best effort: any failure yields no
-/// history and the ask proceeds unthreaded.
-async fn load_thread_history(app: &AppHandle, thread_id: &str) -> String {
-    let owned = vec![
+    let mut args = vec![
         "chat-thread".to_string(),
         "--id".to_string(),
         thread_id.to_string(),
         "--limit".to_string(),
         "200".to_string(),
     ];
-    let root = match crate::bridge::data_root() {
-        Ok(root) => root,
-        Err(_) => return String::new(),
-    };
-    let mut args: Vec<String> = owned;
     args.extend(crate::bridge::db_args(app, &root));
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let messages = crate::bridge::run_sidecar_async(app, &refs)
@@ -1972,55 +1761,22 @@ async fn load_thread_history(app: &AppHandle, thread_id: &str) -> String {
         .and_then(|out| out.json.get("messages").cloned())
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
-    shape_history(&messages, 800)
+    recent_turns(&messages, 8)
 }
 
-/// Last two exchanges (user/agent turns), oldest first, newest kept when
-/// trimming. Pure for tests.
-fn shape_history(messages: &[serde_json::Value], budget: usize) -> String {
-    const PER_TURN: usize = 300;
-    let mut turns: Vec<String> = Vec::new();
-    for message in messages {
-        let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
-        let label = match role {
-            "user" => "User",
-            "agent" => "Assistant",
-            "error" => "System",
-            _ => continue,
-        };
-        let text = message
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim();
-        if text.is_empty() {
-            continue;
-        }
-        let clipped: String = text.chars().take(PER_TURN).collect();
-        let clipped = if text.chars().count() > PER_TURN {
-            format!("{clipped}...")
-        } else {
-            clipped
-        };
-        turns.push(format!("{label}: {clipped}"));
-    }
-    // Keep the newest turns that fit; the latest turn (often the correction
-    // itself) is never dropped while anything is kept.
-    let mut kept: Vec<&String> = Vec::new();
-    let mut used = 0usize;
-    for turn in turns.iter().rev() {
-        if !kept.is_empty() && used + turn.len() + 1 > budget {
-            break;
-        }
-        used += turn.len() + 1;
-        kept.push(turn);
-    }
-    kept.reverse();
-    kept
+/// User and agent turns only, newest `keep`, oldest first. Pure for tests.
+fn recent_turns(messages: &[serde_json::Value], keep: usize) -> Vec<serde_json::Value> {
+    let turns: Vec<serde_json::Value> = messages
         .iter()
-        .map(|turn| turn.as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
+        .filter_map(|message| {
+            let role = message.get("role").and_then(|v| v.as_str())?;
+            let text = message.get("text").and_then(|v| v.as_str())?.trim();
+            (matches!(role, "user" | "agent") && !text.is_empty())
+                .then(|| serde_json::json!({ "role": role, "text": text }))
+        })
+        .collect();
+    let skip = turns.len().saturating_sub(keep);
+    turns.into_iter().skip(skip).collect()
 }
 
 /// Best-effort chat persistence: failures are swallowed so a store hiccup
@@ -2102,100 +1858,36 @@ pub fn glint_timeline(app: AppHandle, date: Option<String>) -> Result<serde_json
 
 #[cfg(test)]
 mod tests {
-    use super::{build_ask_prompt, is_retryable, scope_phrases, shape_history};
+    use super::{parse_ask_reply, recent_turns};
 
-    #[test]
-    fn scope_wording_follows_the_selected_range() {
-        assert_eq!(scope_phrases("day").0, "today");
-        assert_eq!(scope_phrases("week").0, "this week");
-        assert_eq!(scope_phrases("all").0, "across your history");
-        // Unknown scopes fall back to the day wording, matching in_scope.
-        assert_eq!(scope_phrases("nonsense").0, "today");
-        assert!(scope_phrases("week").1.contains("this week"));
+    fn message(role: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({ "role": role, "text": text })
     }
 
     #[test]
-    fn deterministic_failures_are_not_retried() {
-        assert!(!is_retryable(
-            "Prompt too large for the local worker: ~2100 estimated input tokens exceed the ~1,600-token budget."
-        ));
-        assert!(!is_retryable("Gemma runtime is not ready. Missing: model."));
-        assert!(!is_retryable("Prompt cannot be empty."));
-    }
-
-    #[test]
-    fn transient_failures_are_retried() {
-        assert!(is_retryable("litert_lm_conversation_send_message failed"));
-        assert!(is_retryable("LiteRT-LM worker exited unexpectedly"));
-        assert!(is_retryable("timed out"));
-        assert!(is_retryable(""));
-    }
-
-    fn history_message(role: &str, text: &str) -> serde_json::Value {
-        serde_json::json!({"role": role, "text": text})
-    }
-
-    #[test]
-    fn empty_history_shapes_to_nothing() {
-        assert_eq!(shape_history(&[], 800), "");
-    }
-
-    #[test]
-    fn history_keeps_speakers_in_order_and_skips_unknown_roles() {
+    fn history_keeps_the_newest_user_and_agent_turns_in_order() {
         let messages = vec![
-            history_message("user", "What did I do?"),
-            history_message("agent", "You coded."),
-            history_message("system", "migrated"),
-            history_message("user", "thats wrong"),
+            message("user", "one"),
+            message("agent", "two"),
+            message("error", "worker was busy"),
+            message("user", "  "),
+            message("user", "three"),
+            message("agent", "four"),
         ];
-        let shaped = shape_history(&messages, 800);
-        assert!(shaped.starts_with("User: What did I do?"), "{shaped}");
-        assert!(shaped.contains("Assistant: You coded."), "{shaped}");
-        assert!(shaped.ends_with("User: thats wrong"), "{shaped}");
+        let turns = recent_turns(&messages, 3);
+        let texts: Vec<&str> = turns.iter().map(|t| t["text"].as_str().unwrap()).collect();
+        assert_eq!(texts, ["two", "three", "four"]);
+        assert!(recent_turns(&[], 8).is_empty());
     }
 
     #[test]
-    fn history_trims_oldest_first_but_never_drops_the_latest_turn() {
-        let messages = vec![
-            history_message("user", &"q".repeat(500)),
-            history_message("agent", &"a".repeat(500)),
-            history_message("user", "thats wrong"),
-        ];
-        let shaped = shape_history(&messages, 800);
-        assert!(shaped.ends_with("User: thats wrong"), "{shaped}");
-        assert!(shaped.len() <= 800, "{shaped}");
-    }
-
-    #[test]
-    fn error_turns_shape_as_system_notes() {
-        let messages = vec![history_message("error", "worker was busy")];
-        assert_eq!(shape_history(&messages, 800), "System: worker was busy");
-    }
-
-    #[test]
-    fn ask_prompt_has_no_mandatory_summary_section() {
-        let prompt = build_ask_prompt("today", "Today", "whats up? hows today?", "[0] x", "");
-        assert!(!prompt.contains("Then a 'Summary:'"), "{prompt}");
-        assert!(!prompt.contains("3-6 dash-led bullet"), "{prompt}");
-        assert!(prompt.contains("Answer the user's actual message"), "{prompt}");
-        assert!(
-            prompt.contains("Only state how long something took if asked"),
-            "{prompt}"
+    fn answer_process_errors_reach_the_user() {
+        assert_eq!(
+            parse_ask_reply(r#"{"error":"InvalidDataException: Empty request."}"#),
+            Err("InvalidDataException: Empty request.".to_string())
         );
-    }
-
-    #[test]
-    fn ask_prompt_quarantines_history_from_citations() {
-        let with_history = build_ask_prompt(
-            "today",
-            "Today",
-            "thats wrong",
-            "[0] x",
-            "\n\nConversation so far (most recent last):\nUser: hi",
-        );
-        assert!(with_history.contains("never at a previous assistant turn"), "{with_history}");
-        assert!(with_history.contains("Conversation so far"), "{with_history}");
-        let without_history = build_ask_prompt("today", "Today", "what did I do?", "[0] x", "");
-        assert!(!without_history.contains("Conversation so far"), "{without_history}");
+        let ok = parse_ask_reply(r#"{"answer":"You watched Episode 3 [1].","citations":[]}"#).unwrap();
+        assert_eq!(ok["answer"], "You watched Episode 3 [1].");
+        assert!(parse_ask_reply("not json").is_err());
     }
 }

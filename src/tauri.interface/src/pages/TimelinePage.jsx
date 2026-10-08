@@ -1,14 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
+  categoryLabel,
+  durationText,
   formatClock,
   formatTimestamp,
+  glintActivities,
+  overlaps,
+  windowNote,
   glintHistory,
   glintSessions,
   glintTimeline,
   sessionView,
 } from "../glint";
 import ScanCard from "../components/ScanCard";
+import ActivityCard from "../components/ActivityCard";
+import ActivityStrip from "../components/ActivityStrip";
 
 function pad(n) {
   return String(n).padStart(2, "0");
@@ -106,23 +113,44 @@ function clusterSessions(scans) {
  * promise ("its summary is on the session above"). Ungrouped scans and
  * not-yet-summarized sessions keep the plain structural header.
  */
-function SessionHeader({ scans, session }) {
-  const times = scans
-    .map((s) => Number(s.capturedAtMilliseconds))
-    .sort((a, b) => a - b);
-  const process = scans[0]?.processName ?? "unknown";
+function SessionHeader({ scans, session, activities = [] }) {
+  // A record lasts until it was last seen (a video watched for twenty
+  // minutes is one record), and a session spans its activities.
+  const starts = scans.map((s) => Number(s.capturedAtMilliseconds));
+  const ends = scans.map((s) =>
+    Math.max(Number(s.capturedAtMilliseconds), Number(s.lastSeenMilliseconds ?? 0)),
+  );
+  const first = session?.startedAtMilliseconds ?? Math.min(...starts);
+  const last = session?.endedAtMilliseconds ?? Math.max(...ends);
   const range =
-    times.length > 1
-      ? `${hourMinute(times[0])}–${hourMinute(times[times.length - 1])}`
-      : hourMinute(times[0]);
+    last - first >= 60000
+      ? `${hourMinute(first)}–${hourMinute(last)}`
+      : hourMinute(first);
+  const process = scans[0]?.processName ?? "unknown";
+  const sorted = [...activities].sort(
+    (a, b) => a.startedAtMilliseconds - b.startedAtMilliseconds,
+  );
   const view = session ? sessionView(session) : null;
   return (
     <div className="session-header">
       <span className="session-tick" aria-hidden="true" />
       <span>
-        Session · {process} · {range} · {scans.length} scan
-        {scans.length === 1 ? "" : "s"}
+        Session · {range} ·{" "}
+        {sorted.length > 0
+          ? `${sorted.length} activit${sorted.length === 1 ? "y" : "ies"}`
+          : `${process} · ${scans.length} scan${scans.length === 1 ? "" : "s"}`}
       </span>
+      {sorted.length > 0 && (
+        <div className="session-activities">
+          {sorted.map((activity) => (
+            <span key={activity.id} className={`session-activity mode-${activity.mode}`}>
+              <span className={`activity-mode mode-${activity.mode}`}>{activity.mode}</span>
+              {activity.label} · {categoryLabel(activity.category)} ·{" "}
+              {durationText(activity.activeMilliseconds)}
+            </span>
+          ))}
+        </div>
+      )}
       {view && (
         <div className="session-summary-block">
           <div className="scan-label">{view.label}</div>
@@ -148,7 +176,7 @@ function shouldShowHeader(cluster) {
   return Boolean(cluster.sessionId);
 }
 
-function renderScanList(scans, emptyText, sessionsById = {}) {
+function renderScanList(scans, emptyText, sessionsById = {}, activitiesBySession = {}) {
   if (scans.length === 0) {
     return (
       <div className="scan-list">
@@ -166,6 +194,7 @@ function renderScanList(scans, emptyText, sessionsById = {}) {
             <SessionHeader
               scans={cluster.scans}
               session={sessionsById[cluster.sessionId]}
+              activities={activitiesBySession[cluster.sessionId] ?? []}
             />
             {cluster.scans.map((scan) => (
               <ScanCard
@@ -195,6 +224,7 @@ function TimelinePage() {
   const [hourTab, setHourTab] = useState("summarized");
   const [history, setHistory] = useState([]);
   const [sessions, setSessions] = useState([]);
+  const [activities, setActivities] = useState([]);
   const [eventsCache, setEventsCache] = useState({});
   const sessionsById = Object.fromEntries(
     (sessions ?? []).map((s) => [s.id, s])
@@ -220,6 +250,13 @@ function TimelinePage() {
       })
       .catch(() => {
         if (!cancelled) setSessions([]);
+      });
+    glintActivities(1000)
+      .then((response) => {
+        if (!cancelled) setActivities(response.activities ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setActivities([]);
       });
     return () => {
       cancelled = true;
@@ -284,7 +321,7 @@ function TimelinePage() {
     let unlisten;
     listen("sessions-updated", (event) => {
       const r = event.payload ?? {};
-      const changed = ["sealed", "summarized", "failed", "minor", "decided", "threaded"].some(
+      const changed = ["sealed", "summarized", "failed", "minor", "decided", "threaded", "activities", "sessionsBuilt"].some(
         (k) => Number(r[k] ?? 0) > 0
       );
       if (event.payload && !changed) return;
@@ -294,9 +331,27 @@ function TimelinePage() {
       glintSessions(50)
         .then((response) => setSessions(response.sessions ?? []))
         .catch(() => {});
+      glintActivities(1000)
+        .then((response) => setActivities(response.activities ?? []))
+        .catch(() => {});
     }).then((fn) => (unlisten = fn));
     return () => unlisten?.();
   }, []);
+
+  const dayStart = new Date(`${dayStr}T00:00:00`).getTime();
+  const dayEnd = new Date(`${addDaysStr(dayStr, 1)}T00:00:00`).getTime();
+  const dayActivities = activities.filter((activity) =>
+    overlaps(activity, dayStart, dayEnd),
+  );
+  const activitiesBySession = {};
+  for (const activity of activities) {
+    (activitiesBySession[activity.sessionId] ??= []).push(activity);
+  }
+  const hourStart = new Date(`${dayStr}T${pad(hour)}:00:00`).getTime();
+  const hourEnd = hourStart + 3600000;
+  const hourActivities = activities
+    .filter((activity) => overlaps(activity, hourStart, hourEnd))
+    .sort((a, b) => a.startedAtMilliseconds - b.startedAtMilliseconds);
 
   const scansByDay = {};
   for (const scan of history) {
@@ -326,6 +381,41 @@ function TimelinePage() {
       });
     }
     return inHour.sort((a, b) => b.ts_wall_ms - a.ts_wall_ms);
+  }
+
+  /**
+   * Folds repeats into one row: the 30 s "still here" heartbeats for the
+   * same app, and consecutive captures of the same thing. Rows are newest
+   * first; a folded row keeps the newest time and shows the span it covers.
+   */
+  function collapseRows(rows) {
+    const out = [];
+    for (const row of rows) {
+      const last = out[out.length - 1];
+      const sameHeartbeat =
+        last &&
+        row.kind === "heartbeat" &&
+        last.kind === "heartbeat" &&
+        last.process === row.process;
+      const sameCapture =
+        last &&
+        row.kind === "scan.completed" &&
+        last.kind === "scan.completed" &&
+        last.label === row.label &&
+        last.process === row.process;
+      if (sameHeartbeat || sameCapture) {
+        last.count = (last.count ?? 1) + 1;
+        last.since_ms = row.ts_wall_ms;
+        continue;
+      }
+      out.push({ ...row });
+    }
+    return out;
+  }
+
+  function foldedNote(row) {
+    if (!row.count || row.count < 2) return "";
+    return ` · ${row.count} ${row.kind === "heartbeat" ? "checks" : "looks"} since ${formatClock(row.since_ms).replace(/\.\d{3}/, "")}`;
   }
 
   function renderEventRow(row, index, list) {
@@ -398,7 +488,10 @@ function TimelinePage() {
         <div className="tl-row dim" key={key}>
           <span className="tl-time">{formatClock(row.ts_wall_ms)}</span>
           <span className="tl-dot idle" />
-          <span className="tl-text">Still in {row.process ?? "unknown"}</span>
+          <span className="tl-text">
+            Still in {row.process ?? "unknown"}
+            {foldedNote(row)}
+          </span>
         </div>
       );
     }
@@ -412,6 +505,7 @@ function TimelinePage() {
             <span className="tl-sub">
               {row.process}
               {row.title ? ` | ${row.title}` : ""}
+              {foldedNote(row)}
             </span>
           </span>
         </div>
@@ -493,6 +587,7 @@ function TimelinePage() {
               <SessionHeader
                 scans={cluster.scans}
                 session={sessionsById[cluster.sessionId]}
+                activities={activitiesBySession[cluster.sessionId] ?? []}
               />
               {cluster.scans.map((scan) => (
                 <ScanCard
@@ -550,8 +645,27 @@ function TimelinePage() {
               </button>
             </div>
             <p className="glint-section-sub">
-              {dayScans.length} scans · {daySwitches} window switches
+              {dayActivities.length} activities · {dayScans.length} scans ·{" "}
+              {daySwitches} window switches
             </p>
+            {dayActivities.length > 0 && (
+              <details className="timeline-activities" open>
+                <summary>Activities on this day</summary>
+                <ActivityStrip activities={dayActivities} />
+                <div className="scan-list">
+                  {[...dayActivities]
+                    .sort((a, b) => a.startedAtMilliseconds - b.startedAtMilliseconds)
+                    .map((activity) => (
+                      <ActivityCard
+                        key={activity.id}
+                        activity={activity}
+                        compact
+                        note={windowNote(activity, dayStart, dayEnd)}
+                      />
+                    ))}
+                </div>
+              </details>
+            )}
             {renderDayList()}
           </>
         )}
@@ -612,11 +726,28 @@ function TimelinePage() {
               </div>
             </div>
             {hourTab === "summarized" ? (
-              renderScanList(
-                scansInHour(dayStr, hour),
-                "No summarized notes this hour. Switch to Timeline to see every switch that happened.",
-                sessionsById
-              )
+              <>
+                {hourActivities.length > 0 && (
+                  <div className="scan-list timeline-hour-activities">
+                    {hourActivities.map((activity) => (
+                      <ActivityCard
+                        key={activity.id}
+                        activity={activity}
+                        compact
+                        note={windowNote(activity, hourStart, hourEnd)}
+                      />
+                    ))}
+                  </div>
+                )}
+                {scansInHour(dayStr, hour).length > 0 || hourActivities.length === 0
+                  ? renderScanList(
+                      scansInHour(dayStr, hour),
+                      "Nothing recorded this hour. Switch to Timeline to see every switch that happened.",
+                      sessionsById,
+                      activitiesBySession
+                    )
+                  : null}
+              </>
             ) : (
               <div className="scan-list">
                 {eventsInHour(dayStr, hour).length === 0 && (
@@ -626,7 +757,7 @@ function TimelinePage() {
                     </div>
                   </div>
                 )}
-                {eventsInHour(dayStr, hour).map((row, index, list) =>
+                {collapseRows(eventsInHour(dayStr, hour)).map((row, index, list) =>
                   renderEventRow(row, index, list)
                 )}
               </div>

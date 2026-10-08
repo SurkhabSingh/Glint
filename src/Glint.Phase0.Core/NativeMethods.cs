@@ -87,6 +87,42 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx buffer);
 
+    internal const uint GaRootOwner = 3;
+    internal const uint MonitorDefaultToNearest = 2;
+
+    [DllImport("user32.dll")]
+    internal static extern nint GetAncestor(nint hWnd, uint flags);
+
+    [DllImport("user32.dll")]
+    internal static extern nint MonitorFromWindow(nint hWnd, uint flags);
+
+    [DllImport("user32.dll", EntryPoint = "GetMonitorInfoW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetMonitorInfo(nint monitor, ref MonitorInfo info);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetLastInputInfo(ref LastInputInfo info);
+
+    [DllImport("kernel32.dll")]
+    internal static extern uint GetTickCount();
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct MonitorInfo
+    {
+        internal uint Size;
+        internal Rect Monitor;
+        internal Rect Work;
+        internal uint Flags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct LastInputInfo
+    {
+        internal uint Size;
+        internal uint Time;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     internal readonly struct Rect
     {

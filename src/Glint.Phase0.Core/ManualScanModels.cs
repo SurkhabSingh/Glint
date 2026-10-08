@@ -30,7 +30,22 @@ public sealed record ManualScanRecord(
     string? RedactedUiAutomationText = null,
     string? RedactedOcrText = null,
     string? OcrLanguage = null,
-    string? SessionId = null);
+    string? SessionId = null,
+    // Activity facets. Null on captures stored before the activity model,
+    // which the segmenter then derives from the process and title instead.
+    string? PageKey = null,
+    string? AppName = null,
+    string? Site = null,
+    string? Subject = null,
+    string? Phase = null,
+    ActivityMode? Mode = null,
+    ActivityCategory? Category = null,
+    CaptureChange? Change = null,
+    long? LastSeenMilliseconds = null,
+    bool UserCaused = false,
+    bool Unsaved = false,
+    string? DialogTitle = null,
+    string? EventKind = null);
 
 public sealed record ContextSearchResult(
     string Id,
@@ -61,7 +76,12 @@ public sealed record ManualScanOutcome(
     // Worker processes started while producing this scan: 0 when nothing was
     // summarized, more than 1 when the summarizer stepped down its context
     // budget. Each start reloads the model, so this is the cost to watch.
-    long WorkerStarts = 0);
+    long WorkerStarts = 0,
+    // How the look was treated, for the host's cadence: in Play and Watch a
+    // moving screen means the user is still there without touching input.
+    ActivityMode? Mode = null,
+    bool ScreenMoving = false,
+    CaptureChange? Change = null);
 
 public sealed record ActivitySummary(
     string Label,

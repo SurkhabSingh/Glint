@@ -88,11 +88,34 @@ struct FgIdentity {
     title: String,
 }
 
+/// The window that owns `hwnd` when both belong to the same process: a Save
+/// As dialog, an export window or a pop-up menu is part of its app's main
+/// window, not a switch to something else.
+fn root_owner(hwnd: HWND) -> HWND {
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GA_ROOTOWNER};
+    unsafe {
+        let owner = GetAncestor(hwnd, GA_ROOTOWNER);
+        if owner.0.is_null() || owner == hwnd {
+            return hwnd;
+        }
+        let mut dialog_pid: u32 = 0;
+        let mut owner_pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut dialog_pid as *mut u32));
+        GetWindowThreadProcessId(owner, Some(&mut owner_pid as *mut u32));
+        if dialog_pid != 0 && dialog_pid == owner_pid {
+            owner
+        } else {
+            hwnd
+        }
+    }
+}
+
 fn identity_of(hwnd_raw: isize) -> Option<FgIdentity> {
     if hwnd_raw == 0 {
         return None;
     }
-    let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+    let hwnd = root_owner(HWND(hwnd_raw as *mut core::ffi::c_void));
+    let hwnd_raw = hwnd.0 as isize;
     let title = unsafe {
         let mut buf = [0u16; 512];
         let read = GetWindowTextW(hwnd, &mut buf).max(0) as usize;

@@ -43,6 +43,15 @@ pub struct CaptureSignals {
     /// has not changed since the last capture.
     pub since_foreground_change_ms: Option<u64>,
     pub on_battery: bool,
+    /// The foreground is a game or video whose screen was still moving at
+    /// the last look: a cutscene, a controller, a lecture. No keyboard or
+    /// mouse input then does not mean the user left.
+    pub screen_active: bool,
+    /// The foreground is a game or a video. Input there is play, not work:
+    /// the slow cadence applies, so a game is not interrupted by a capture
+    /// every few seconds and a video is not re-read. A switch still
+    /// captures at once.
+    pub visual_foreground: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,7 +89,7 @@ pub enum CaptureDecision {
 pub fn decide(signals: CaptureSignals) -> CaptureDecision {
     // Away beats everything, including a pending window switch: a window that
     // changes while nobody is at the machine is not the user working.
-    if signals.idle_ms >= IDLE_AFTER_MS {
+    if signals.idle_ms >= IDLE_AFTER_MS && !signals.screen_active {
         return CaptureDecision::Idle;
     }
 
@@ -101,7 +110,7 @@ pub fn decide(signals: CaptureSignals) -> CaptureDecision {
         return CaptureDecision::Capture(CaptureReason::First);
     };
 
-    let working = signals.idle_ms < ACTIVE_INPUT_WINDOW_MS;
+    let working = signals.idle_ms < ACTIVE_INPUT_WINDOW_MS && !signals.visual_foreground;
     let (interval, reason) = if working {
         (ACTIVE_INTERVAL_MS * scale, CaptureReason::Active)
     } else {
@@ -180,7 +189,50 @@ mod tests {
             since_last_scan_ms: Some(0),
             since_foreground_change_ms: None,
             on_battery: false,
+            screen_active: false,
+            visual_foreground: false,
         }
+    }
+
+    #[test]
+    fn games_and_video_keep_the_slow_cadence_while_input_flows() {
+        let playing = CaptureSignals {
+            idle_ms: 50,
+            since_last_scan_ms: Some(ACTIVE_INTERVAL_MS * 4),
+            visual_foreground: true,
+            ..signals()
+        };
+        assert!(matches!(decide(playing), CaptureDecision::Wait(_)));
+
+        let switched = CaptureSignals {
+            since_foreground_change_ms: Some(SWITCH_DEBOUNCE_MS),
+            ..playing
+        };
+        assert_eq!(
+            decide(switched),
+            CaptureDecision::Capture(CaptureReason::WindowSwitch)
+        );
+    }
+
+    #[test]
+    fn a_moving_game_or_video_is_not_away() {
+        // Hands off for a cutscene: still there, checked at the slow cadence.
+        let watching = CaptureSignals {
+            idle_ms: IDLE_AFTER_MS + 60_000,
+            since_last_scan_ms: Some(PASSIVE_INTERVAL_MS),
+            screen_active: true,
+            ..signals()
+        };
+        assert_eq!(
+            decide(watching),
+            CaptureDecision::Capture(CaptureReason::Passive)
+        );
+
+        let still = CaptureSignals {
+            screen_active: false,
+            ..watching
+        };
+        assert_eq!(decide(still), CaptureDecision::Idle);
     }
 
     #[test]

@@ -234,6 +234,7 @@ fn shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 pub fn run() {
     tauri::Builder::default()
         .manage(glint::ScanRuntime::default())
+        .manage(glint::AskServer::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(shortcut_plugin())
@@ -300,6 +301,9 @@ pub fn run() {
             glint::glint_chat_append,
             glint::glint_sessions,
             glint::glint_set_session_outcome,
+            glint::glint_activities,
+            glint::glint_set_activity_task,
+            glint::glint_set_app_mode,
             glint::glint_import_model,
             glint::glint_start_scanning,
             glint::glint_pause_scanning,
