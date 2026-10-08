@@ -206,28 +206,40 @@ fn shortcut_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
             ids.insert(shortcut.id(), name);
         }
     }
-    let names: Vec<&str> = SCAN_HOTKEYS.iter().map(|(name, _)| *name).collect();
+    // The keys themselves are registered one by one in setup (see
+    // register_scan_hotkeys): registering them here would make a single
+    // chord another app already owns abort the whole app at startup.
     tauri_plugin_global_shortcut::Builder::new()
-        .with_shortcuts(names)
-        .map(|builder| {
-            builder
-                .with_handler(move |app, shortcut, event| {
-                    if event.state != ShortcutState::Pressed {
-                        return;
-                    }
-                    match ids.get(&shortcut.id()).copied().unwrap_or("") {
-                        "ctrl+alt+g" => toggle_command_bar(app),
-                        "ctrl+alt+s" => start_scan_action(app),
-                        "ctrl+alt+p" => pause_scan_action(app),
-                        _ => {}
-                    }
-                })
-                .build()
+        .with_handler(move |app, shortcut, event| {
+            if event.state != ShortcutState::Pressed {
+                return;
+            }
+            match ids.get(&shortcut.id()).copied().unwrap_or("") {
+                "ctrl+alt+g" => toggle_command_bar(app),
+                "ctrl+alt+s" => start_scan_action(app),
+                "ctrl+alt+p" => pause_scan_action(app),
+                _ => {}
+            }
         })
-        .unwrap_or_else(|error| {
-            eprintln!("Glint global shortcuts unavailable: {error}");
-            tauri_plugin_global_shortcut::Builder::<tauri::Wry>::new().build()
-        })
+        .build()
+}
+
+/// Register each scan hotkey on its own. A chord another app (or a second
+/// Glint) already holds is skipped with a note, never fatal: the rest still
+/// work, and Diagnostics lists the one that could not be taken.
+fn register_scan_hotkeys(app: &tauri::AppHandle) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    if std::env::var("GLINT_NO_HOTKEYS")
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false)
+    {
+        return;
+    }
+    for (name, _) in SCAN_HOTKEYS {
+        if let Err(error) = app.global_shortcut().register(name) {
+            eprintln!("Glint hotkey {name} unavailable (another app may own it): {error}");
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -239,6 +251,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(shortcut_plugin())
         .setup(|app| {
+            register_scan_hotkeys(app.handle());
             // Pin LiteRT python/worker env for every sidecar this process
             // spawns (tray and hotkey actions included).
             let _ = glint::glint_ensure_runtime(app.handle().clone());
