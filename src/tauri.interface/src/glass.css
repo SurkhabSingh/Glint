@@ -23,10 +23,10 @@
   --window-radius: 0px;
   --cmdbar-radius: 16px;
 
-  --glass-titlebar-bg: rgba(0, 0, 0, 0.15);
+  --glass-titlebar-bg: rgb(var(--shade-rgb) / calc(0.15 * var(--shade-k)));
 
-  --glass-sheen-top: rgba(255, 255, 255, 0.03);
-  --glass-sheen-mid: rgba(255, 255, 255, 0.02);
+  --glass-sheen-top: rgb(var(--fg-rgb) / 0.03);
+  --glass-sheen-mid: rgb(var(--fg-rgb) / 0.02);
 
   --page-padding: 28px;
   --page-max-width: 980px;
@@ -38,27 +38,27 @@
   --card-radius: 18px;
   --card-bg: linear-gradient(
     180deg,
-    rgba(255, 255, 255, 0.01),
-    rgba(255, 255, 255, 0) 42%,
+    rgb(var(--fg-rgb) / 0.01),
+    rgb(var(--fg-rgb) / 0) 42%,
     transparent 56%,
-    rgba(0, 0, 0, 0.1)
+    rgb(var(--shade-rgb) / calc(0.1 * var(--shade-k)))
   ),
-  rgba(20, 22, 30, 0.55);
-  --card-border: 1px solid rgba(255, 255, 255, 0.13);
-  --card-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.12);
-  --card-shadow: 0 14px 34px rgba(0, 0, 0, 0.38);
-  --card-blur: blur(22px) saturate(150%);
+  rgb(var(--surface-rgb) / var(--card-alpha));
+  --card-border: 1px solid rgb(var(--fg-rgb) / 0.13);
+  --card-highlight: inset 0 1px 0 rgb(var(--fg-rgb) / 0.12);
+  --card-shadow: 0 14px 34px rgb(var(--shade-rgb) / calc(0.38 * var(--shade-k)));
+  --card-blur: blur(var(--card-blur-px)) saturate(150%);
 
   --glass-scroll-size: 8px;
   --glass-scroll-thumb: linear-gradient(
     180deg,
-    rgba(255, 255, 255, 0.3),
-    rgba(255, 255, 255, 0.14)
+    rgb(var(--fg-rgb) / 0.3),
+    rgb(var(--fg-rgb) / 0.14)
   );
   --glass-scroll-thumb-hover: linear-gradient(
     180deg,
-    rgba(255, 255, 255, 0.45),
-    rgba(255, 255, 255, 0.22)
+    rgb(var(--fg-rgb) / 0.45),
+    rgb(var(--fg-rgb) / 0.22)
   );
   --glass-scroll-track: transparent;
 }
@@ -66,7 +66,7 @@
 /* ---- Liquid-glass scrollbars (Chromium/WebView2) ---- */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+  scrollbar-color: rgb(var(--fg-rgb) / 0.25) transparent;
 }
 
 *::-webkit-scrollbar {

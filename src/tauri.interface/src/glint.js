@@ -45,8 +45,12 @@ export function formatClock(ms) {
   const pad = (n, w = 2) => String(n).padStart(w, "0");
   return `${hours}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)} ${ampm}`;
 }
-export const glintSetGlassTint = ({ r, g, b, alpha }) =>
-  invoke("glint_set_glass_tint", { r, g, b, alpha });
+export const glintSetGlassTint = ({ r, g, b, alpha, blur = true }) =>
+  invoke("glint_set_glass_tint", { r, g, b, alpha, blur });
+/** Native zoom of the dashboard window (0.5 – 2). */
+export const glintSetZoom = (scale) => invoke("glint_set_zoom", { scale });
+/** Time per activity inside [from, to) for the dashboard chart. */
+export const glintUsage = (from, to) => invoke("glint_usage", { from, to });
 export const glintStartScanning = () => invoke("glint_start_scanning");
 export const glintPauseScanning = () => invoke("glint_pause_scanning");
 export const glintScanState = () => invoke("glint_scan_state");

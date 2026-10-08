@@ -1,5 +1,4 @@
 import { useEffect } from "react";
-import { presetThemes } from "./ColorSwitcher";
 import "./TitlebarMenu.css";
 
 const MENU_WIDTH = 250;
@@ -7,9 +6,7 @@ const MENU_MAX_HEIGHT = 420;
 
 function TitlebarMenu({
   position,
-  activePreset,
-  onPreset,
-  onCustomize,
+  onAppearance,
   onMinimize,
   onToggleMaximize,
   onCloseWindow,
@@ -59,32 +56,11 @@ function TitlebarMenu({
         </button>
 
         <div className="tbmenu-separator" />
-        <div className="tbmenu-label">Window theme</div>
-
-        <div className="tbmenu-presets">
-          {presetThemes.map((preset, index) => (
-            <button
-              key={preset.name}
-              className={`tbmenu-item tbmenu-preset ${activePreset === index ? "checked" : ""}`}
-              onClick={wrap(() => onPreset(index))}
-              title={preset.name}
-            >
-              <span
-                className="tbmenu-dot"
-                style={{ backgroundColor: preset.accent }}
-              />
-              <span className="tbmenu-name">{preset.name}</span>
-              <span className="tbmenu-check">{activePreset === index ? "\u2713" : ""}</span>
-            </button>
-          ))}
-        </div>
-
-        <div className="tbmenu-separator" />
         <button
           className="tbmenu-item tbmenu-customize"
-          onClick={wrap(onCustomize)}
+          onClick={wrap(onAppearance)}
         >
-          Customize colors&hellip;
+          Theme &amp; transparency&hellip;
         </button>
       </div>
     </div>

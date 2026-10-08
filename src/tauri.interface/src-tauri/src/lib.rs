@@ -245,7 +245,7 @@ pub fn run() {
             // Frosted glass behind both frameless windows (default theme
             // tint; the frontend re-tints on every theme change).
             let (r, g, b, a) = glass::tuning::DEFAULT_TINT;
-            glass::apply_tint(app.handle(), r, g, b, a);
+            glass::apply_tint(app.handle(), r, g, b, a, true);
             // Foreground-switch hook for the live timeline (pump drops
             // everything while scanning is off).
             timeline::start_hook(app.handle().clone());
@@ -314,6 +314,8 @@ pub fn run() {
             glint::glint_ensure_runtime,
             glint::glint_setup_runtime,
             glint::glint_set_glass_tint,
+            glint::glint_usage,
+            glint::glint_set_zoom,
             glint::glint_timeline,
             glint::glint_shortcut_status,
             glint::glint_ask,

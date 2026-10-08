@@ -10,7 +10,7 @@ import {
   parseQuickCommand,
   QuickCommandKind,
 } from "../glint";
-import { hexToRgba, loadTheme, sanitizeTheme } from "../ColorSwitcher";
+import { applyAppearanceVars, loadAppearance, resolveAppearance } from "../themes";
 
 const SUGGESTIONS = [
   { tag: "capture this", glyph: "⧉" },
@@ -28,7 +28,7 @@ const SUGGESTIONS = [
 function CommandBar() {
   const [text, setText] = useState("");
   const [selected, setSelected] = useState(-1);
-  const [theme, setTheme] = useState(loadTheme);
+  const [appearance, setAppearance] = useState(loadAppearance);
   const inputRef = useRef(null);
 
   const hide = useCallback(async () => {
@@ -82,7 +82,7 @@ function CommandBar() {
   useEffect(() => {
     let unlisten;
     listen("command-bar-shown", () => {
-      setTheme(loadTheme());
+      setAppearance(loadAppearance());
       setText("");
       setSelected(-1);
       inputRef.current?.focus();
@@ -121,26 +121,24 @@ function CommandBar() {
     }
   }
 
-  const safeTheme = sanitizeTheme(theme);
+  const resolved = resolveAppearance(appearance);
+  useEffect(() => {
+    applyAppearanceVars(resolveAppearance(appearance));
+  }, [appearance]);
 
   return (
     <div
       className="cmdbar"
       style={{
-        backgroundColor: hexToRgba(
-          safeTheme.bg,
-          Math.min(1, safeTheme.bgAlpha + 0.25),
-        ),
+        // A touch more solid than the dashboard: it floats over anything.
+        backgroundColor: `rgb(${resolved.vars["--bg-rgb"]} / ${Math.min(1, resolved.glass.alpha + 0.15)})`,
       }}
     >
       <div className="cmdbar-grip" data-tauri-drag-region>
         <span data-tauri-drag-region />
       </div>
       <div className="cmdbar-input-row">
-        <span
-          className="cmdbar-badge"
-          style={{ backgroundColor: safeTheme.accent }}
-        >
+        <span className="cmdbar-badge">
           G
         </span>
         <input

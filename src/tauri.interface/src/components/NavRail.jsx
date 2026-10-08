@@ -1,4 +1,15 @@
 const ICONS = {
+  dashboard: (
+    <svg
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+    >
+      <path d="M2 14h12" strokeLinecap="round" />
+      <path d="M4 11.5V8M7 11.5V3.5M10 11.5V6M13 11.5V9" strokeLinecap="round" />
+    </svg>
+  ),
   activity: (
     <svg
       viewBox="0 0 16 16"
@@ -102,9 +113,10 @@ function RailButton({ id, label, page, onNavigate }) {
   );
 }
 
-/** Ports NavigationView PaneDisplayMode=LeftCompact (Activity/Search/Diagnostics). */
+/** Ports NavigationView PaneDisplayMode=LeftCompact (Dashboard/Activity/Search/...). */
 function NavRail({ page, onNavigate }) {
   const items = [
+    { id: "dashboard", label: "Dashboard" },
     { id: "activity", label: "Activity" },
     { id: "search", label: "Search" },
     { id: "diagnostics", label: "Diag." },

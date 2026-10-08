@@ -1,19 +1,18 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import ColorSwitcher, {
-  hexToRgb,
-  hexToRgba,
-  loadTheme,
-  presetThemes,
-  presetIndexForTheme,
-  sanitizeTheme,
-  stripPresetName,
-} from "./ColorSwitcher";
+import {
+  applyAppearanceVars,
+  loadAppearance,
+  resolveAppearance,
+  saveAppearance,
+  stepZoom,
+} from "./themes";
 import TitlebarMenu from "./TitlebarMenu";
 import NavRail from "./components/NavRail";
 import CommandBar from "./components/CommandBar";
 import ActivityPage from "./pages/ActivityPage";
+import DashboardPage from "./pages/DashboardPage";
 import SearchPage from "./pages/SearchPage";
 import DiagnosticsPage from "./pages/DiagnosticsPage";
 import SettingsPage from "./pages/SettingsPage";
@@ -22,6 +21,7 @@ import AgentPage from "./pages/AgentPage";
 import {
   glintInitialize,
   glintSetGlassTint,
+  glintSetZoom,
   glintProbe,
   glintVerifyStorage,
   glintCheckCompatibility,
@@ -41,6 +41,7 @@ import {
 import "./App.css";
 import "./Glint.css";
 import "./glass.css";
+import "./Dashboard.css";
 
 function resolveWindowLabel() {
   try {
@@ -79,9 +80,8 @@ function App() {
       cancelled = true;
     };
   }, []);
-  const [theme, setTheme] = useState(loadTheme);
+  const [appearance, setAppearance] = useState(loadAppearance);
   const [menuPos, setMenuPos] = useState(null);
-  const [panelOpen, setPanelOpen] = useState(false);
   const [page, setPage] = useState("activity");
 
   // Dashboard state (ports MainViewModel properties).
@@ -107,30 +107,65 @@ function App() {
   const [sessions, setSessions] = useState([]);
   const [activities, setActivities] = useState([]);
 
-  const safeTheme = sanitizeTheme(theme);
-  const windowBg = hexToRgba(safeTheme.bg, safeTheme.bgAlpha);
+  const resolved = resolveAppearance(appearance);
+  const windowBg = resolved.vars["--window-bg"];
+  const glassKey = JSON.stringify(resolved.glass);
   const tintTimer = useRef(null);
 
+  // Theme colors go straight onto the document as CSS variables; the
+  // settings are shared with the command bar through localStorage.
   useEffect(() => {
-    document.documentElement.style.setProperty("--window-bg", windowBg);
-    document.documentElement.style.setProperty(
-      "--accent-color",
-      safeTheme.accent,
-    );
-    localStorage.setItem("glint-window-theme", JSON.stringify(safeTheme));
-    // Re-tint the OS frosted-glass backdrop to match (debounced; acrylic
-    // re-application is cheap but slider drags fire many renders).
+    if (windowLabel !== "main") return;
+    applyAppearanceVars(resolveAppearance(appearance));
+    saveAppearance(appearance);
+  }, [appearance, windowLabel]);
+
+  // Native zoom of this window. Outside Tauri (browser dev) CSS zoom
+  // stands in so the setting can still be seen working.
+  useEffect(() => {
+    if (windowLabel !== "main") return;
+    const zoom = appearance.zoom;
+    glintSetZoom(zoom)
+      .then(() => {
+        document.documentElement.style.zoom = "";
+      })
+      .catch(() => {
+        document.documentElement.style.zoom = String(zoom);
+      });
+  }, [appearance.zoom, windowLabel]);
+
+  // Ctrl + / Ctrl - / Ctrl 0, as in a browser. None of these mean anything
+  // inside a text field, so they work while typing too.
+  useEffect(() => {
+    if (windowLabel !== "main") return;
+    function onKeyDown(e) {
+      if (!e.ctrlKey || e.altKey || e.metaKey) return;
+      let next = null;
+      if (e.key === "=" || e.key === "+") next = (z) => stepZoom(z, 1);
+      else if (e.key === "-" || e.key === "_") next = (z) => stepZoom(z, -1);
+      else if (e.key === "0") next = () => 1;
+      if (!next) return;
+      e.preventDefault();
+      setAppearance((a) => ({ ...a, zoom: next(a.zoom) }));
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [windowLabel]);
+
+  // Re-tint (or un-frost) the OS glass behind both windows. Debounced:
+  // acrylic re-application is cheap, but slider drags fire many renders.
+  useEffect(() => {
+    if (windowLabel !== "main") return;
     if (tintTimer.current) clearTimeout(tintTimer.current);
     tintTimer.current = setTimeout(() => {
-      const { r, g, b } = hexToRgb(safeTheme.bg);
-      glintSetGlassTint({ r, g, b, alpha: safeTheme.bgAlpha }).catch(() => {
+      glintSetGlassTint(JSON.parse(glassKey)).catch(() => {
         /* browser dev or glass unsupported: CSS translucency remains */
       });
     }, 120);
     return () => {
       if (tintTimer.current) clearTimeout(tintTimer.current);
     };
-  }, [windowBg, safeTheme]);
+  }, [glassKey, windowLabel]);
 
   const applyOutcome = useCallback((payload) => {
     if (payload?.tickId != null) {
@@ -483,10 +518,6 @@ function App() {
     }
   }
 
-  function applyMenuPreset(index) {
-    setTheme(stripPresetName(presetThemes[index]));
-  }
-
   if (windowLabel === null) {
     return null;
   }
@@ -514,7 +545,7 @@ function App() {
             viewBox="0 0 32 32"
             width="20.5"
             height="20.5"
-            fill="rgb(83,234,213,0.8)"
+            fill="var(--accent-color)"
             aria-hidden="true"
           >
             <path d="M16 1.4C16.62 10.8 17.9 14.1 30.6 16C17.9 17.9 16.62 21.2 16 30.6C15.38 21.2 14.1 17.9 1.4 16C14.1 14.1 15.38 10.8 16 1.4Z"></path>
@@ -539,9 +570,7 @@ function App() {
       {menuPos && (
         <TitlebarMenu
           position={menuPos}
-          activePreset={presetIndexForTheme(theme)}
-          onPreset={applyMenuPreset}
-          onCustomize={() => setPanelOpen(true)}
+          onAppearance={() => setPage("settings")}
           onMinimize={minimize}
           onToggleMaximize={toggleMaximize}
           onCloseWindow={close}
@@ -587,7 +616,10 @@ function App() {
             results={results}
           />
         )}
-        {page === "settings" && <SettingsPage />}
+        {page === "dashboard" && <DashboardPage />}
+        {page === "settings" && (
+          <SettingsPage appearance={appearance} onAppearanceChange={setAppearance} />
+        )}
         {page === "timeline" && <TimelinePage />}
         {page === "agent" && <AgentPage />}
         {page === "diagnostics" && (
@@ -601,14 +633,6 @@ function App() {
           />
         )}
       </div>
-
-      {panelOpen && (
-        <ColorSwitcher
-          value={theme}
-          onChange={setTheme}
-          onClose={() => setPanelOpen(false)}
-        />
-      )}
     </div>
   );
 }

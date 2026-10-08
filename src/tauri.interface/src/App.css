@@ -21,7 +21,7 @@
   line-height: 24px;
   font-weight: 400;
 
-  color: #f6f6f6;
+  color: var(--text);
   background: transparent;
 
   font-synthesis: none;
@@ -30,8 +30,32 @@
   -moz-osx-font-smoothing: grayscale;
   -webkit-text-size-adjust: 100%;
 
-  --window-bg: rgba(30, 60, 114, 0.55);
-  --accent-color: #42a5f5;
+  /* Defaults = Catppuccin Mocha; themes.js rewrites these at startup. */
+  --bg-rgb: 30 30 46;
+  --surface-rgb: 49 50 68;
+  --surface2-rgb: 69 71 90;
+  --fg-rgb: 205 214 244;
+  --text: #cdd6f4;
+  --muted: #a6adc8;
+  --accent-color: #cba6f7;
+  --on-accent: #1e1e2e;
+  --shade-rgb: 0 0 0;
+  --shade-k: 1;
+  --window-bg: rgb(30 30 46 / 0.78);
+  --card-alpha: 0.6;
+  --card-blur-px: 22px;
+  --good: #a6e3a1;
+  --warn: #f9e2af;
+  --bad: #f38ba8;
+  --info: #89b4fa;
+  --c-red: #f38ba8;
+  --c-orange: #fab387;
+  --c-yellow: #f9e2af;
+  --c-green: #a6e3a1;
+  --c-teal: #94e2d5;
+  --c-blue: #89b4fa;
+  --c-purple: #cba6f7;
+  --c-pink: #f5c2e7;
 }
 
 /* Transparent webview so the desktop shows through the window */
@@ -97,7 +121,7 @@ body,
   font-size: 18px;
   font-weight: 600;
   letter-spacing: 1px;
-  color: rgba(255, 255, 255, 0.85);
+  color: rgb(var(--fg-rgb) / 0.85);
   font-family: "Fraunces", Georgia, serif;
 }
 
@@ -110,7 +134,7 @@ body,
   width: 46px;
   border: none;
   background: transparent;
-  color: rgba(255, 255, 255, 0.8);
+  color: rgb(var(--fg-rgb) / 0.8);
   font-size: 14px;
   cursor: pointer;
   display: flex;
@@ -119,12 +143,12 @@ body,
 }
 
 .tb-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgb(var(--fg-rgb) / 0.15);
 }
 
 .tb-close:hover {
   background: #e81123;
-  color: #fff;
+  color: var(--text);
 }
 
 /* ---- Content area inside the translucent window ---- */
@@ -143,10 +167,10 @@ body,
 .content-card {
   padding: 48px 56px;
   border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: #14141e;
+  border: 1px solid rgb(var(--fg-rgb) / 0.12);
+  background: rgb(var(--surface-rgb));
   text-align: center;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 8px 32px rgb(var(--shade-rgb) / calc(0.4 * var(--shade-k)));
   min-width: 380px;
 }
 
@@ -162,7 +186,7 @@ body,
 .subtitle {
   text-align: center;
   font-size: 14px;
-  color: rgba(255, 255, 255, 0.6);
+  color: rgb(var(--fg-rgb) / 0.6);
   margin: 0 0 32px 0;
   letter-spacing: 0.5px;
 }
@@ -181,16 +205,16 @@ body,
   font-size: 14px;
   font-weight: 600;
   font-family: var(--font-ui);
-  color: #ffffff;
+  color: var(--text);
   border-radius: 8px;
   transition: all 0.25s ease;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 4px 12px rgb(var(--shade-rgb) / calc(0.2 * var(--shade-k)));
   letter-spacing: 0.3px;
 }
 
 .accent-btn:hover {
   transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 6px 16px rgb(var(--shade-rgb) / calc(0.25 * var(--shade-k)));
   filter: brightness(1.1);
 }
 
@@ -209,5 +233,5 @@ body,
 
 .ghost-btn:hover {
   transform: translateY(-2px);
-  background-color: rgba(255, 255, 255, 0.1);
+  background-color: rgb(var(--fg-rgb) / 0.1);
 }

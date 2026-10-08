@@ -559,6 +559,43 @@ pub fn glint_activities(app: AppHandle, limit: Option<u32>) -> Result<serde_json
     Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
 }
 
+/// Native page zoom for the dashboard window (WebView2 zoom, like Ctrl +/-
+/// in a browser): everything scales, layout reflows. The command bar keeps
+/// 100% because its window has a fixed size.
+#[tauri::command]
+pub fn glint_set_zoom(app: AppHandle, scale: f64) -> Result<f64, String> {
+    if !scale.is_finite() {
+        return Err("Zoom must be a number.".to_string());
+    }
+    let scale = scale.clamp(0.5, 2.0);
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "The main window is not open.".to_string())?;
+    window.set_zoom(scale).map_err(|error| error.to_string())?;
+    Ok(scale)
+}
+
+/// Time per activity inside [from, to): what the dashboard charts. Only
+/// app, site, subject, mode, category and the active segments cross over;
+/// no summaries or captured text.
+#[tauri::command(async)]
+pub fn glint_usage(app: AppHandle, from: i64, to: i64) -> Result<serde_json::Value, String> {
+    if to <= from {
+        return Err("The end of the range must be after its start.".to_string());
+    }
+    let root = crate::bridge::data_root()?;
+    let mut args = vec![
+        "usage".to_string(),
+        "--from".to_string(),
+        from.to_string(),
+        "--to".to_string(),
+        to.to_string(),
+    ];
+    args.extend(crate::bridge::db_args(&app, &root));
+    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
+    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+}
+
 /// The user's verdict on an activity's task. Absolute: no rule rewrites it.
 #[tauri::command(async)]
 pub fn glint_set_activity_task(
@@ -1365,8 +1402,9 @@ pub fn glint_set_glass_tint(
     g: u8,
     b: u8,
     alpha: f32,
+    blur: Option<bool>,
 ) -> Result<(), String> {
-    crate::glass::apply_tint(&app, r, g, b, alpha);
+    crate::glass::apply_tint(&app, r, g, b, alpha, blur.unwrap_or(true));
     Ok(())
 }
 

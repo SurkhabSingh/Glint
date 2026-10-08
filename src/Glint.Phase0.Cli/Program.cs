@@ -649,6 +649,49 @@ try
             break;
         }
 
+        // Time per activity inside [from, to) for the dashboard chart: stored
+        // activities plus what is being recorded right now. Slim rows only:
+        // no summaries, tasks or captured text.
+        case "usage":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            var from = long.Parse(RequireOption(options, "from"), System.Globalization.CultureInfo.InvariantCulture);
+            var to = long.Parse(RequireOption(options, "to"), System.Globalization.CultureInfo.InvariantCulture);
+            if (to <= from)
+            {
+                throw new ArgumentException("--to must be after --from.");
+            }
+
+            var source = new DatabaseAskSource(database);
+            var stored = source.GetActivitiesBetween(from, to);
+            var live = source.GetLiveActivities()
+                .Where(activity => activity.StartedAtMilliseconds < to
+                    && Math.Max(activity.EndedAtMilliseconds, activity.StartedAtMilliseconds + 1) > from)
+                .Where(activity => !stored.Any(existing => existing.Key == activity.Key
+                    && existing.StartedAtMilliseconds == activity.StartedAtMilliseconds));
+            var rows = stored.Concat(live)
+                .Select(activity => new
+                {
+                    id = activity.Id,
+                    app = activity.App,
+                    site = activity.Site,
+                    label = string.IsNullOrWhiteSpace(activity.Label) ? activity.Subject : activity.Label,
+                    subject = activity.Subject,
+                    mode = activity.Mode.ToString(),
+                    category = activity.Category.ToString(),
+                    startedAtMilliseconds = activity.StartedAtMilliseconds,
+                    endedAtMilliseconds = activity.EndedAtMilliseconds,
+                    segments = (activity.Segments.Count > 0
+                            ? activity.Segments
+                            : [new ActivitySegment(activity.StartedAtMilliseconds, activity.EndedAtMilliseconds)])
+                        .Select(segment => new[] { segment.StartMilliseconds, segment.EndMilliseconds })
+                        .ToList()
+                })
+                .ToList();
+            WriteJson(new { from, to, activities = rows }, json);
+            break;
+        }
+
         // The user's verdict on an activity's task. Absolute: no rule rewrites it.
         case "activity-task":
         {
@@ -875,6 +918,7 @@ try
                   sessions [--limit 50] [--data-dir PATH] [--sqlite-vec PATH]
                   sessionize [--max-summaries 8] [--seal-open] [--data-dir PATH] [--sqlite-vec PATH]
                   activities [--limit 200] [--data-dir PATH]
+                  usage --from MS --to MS [--data-dir PATH]
                   activity-task --id ID --status Open|LooksDone|Done|None [--data-dir PATH]
                   app-mode --key app:NAME|site:HOST --mode Read|Make|Play|Watch|Private [--category NAME]
                   app-profiles [--data-dir PATH]
