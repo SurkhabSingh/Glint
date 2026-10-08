@@ -47,6 +47,10 @@ export function formatClock(ms) {
 }
 export const glintSetGlassTint = ({ r, g, b, alpha, blur = true }) =>
   invoke("glint_set_glass_tint", { r, g, b, alpha, blur });
+/** Whether Glint runs as administrator: { elevated }. */
+export const glintAdminStatus = () => invoke("glint_admin_status");
+/** Restart Glint as administrator (Windows asks for consent first). */
+export const glintRestartAsAdmin = () => invoke("glint_restart_as_admin");
 /** Native zoom of the dashboard window (0.5 – 2). */
 export const glintSetZoom = (scale) => invoke("glint_set_zoom", { scale });
 /** Time per activity inside [from, to) for the dashboard chart. */

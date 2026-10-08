@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { glintAdminStatus, glintRestartAsAdmin } from "../glint";
 import { ACCENTS, DEFAULT_APPEARANCE, THEMES, ZOOM_STEPS, stepZoom, themeById } from "../themes";
 
 function Toggle({ checked, onToggle, label, disabled = false }) {
@@ -151,6 +152,58 @@ function ThemeSelect({ value, onChange }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Apps running as administrator (some games and their anti-cheat, admin
+ * tools) can't be read by a Glint that isn't. Glint still records their
+ * name, title and time; restarting it as administrator lets it read them.
+ */
+function AdminCard() {
+  const [elevated, setElevated] = useState(null);
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    glintAdminStatus()
+      .then((status) => setElevated(Boolean(status?.elevated)))
+      .catch(() => setElevated(null));
+  }, []);
+
+  async function restart() {
+    setBusy(true);
+    setMessage("");
+    try {
+      await glintRestartAsAdmin();
+    } catch (error) {
+      setMessage(String(error?.message ?? error));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="glint-card">
+      <h3>Apps running as administrator</h3>
+      <div className="setting-row">
+        <div>
+          <div className="setting-name">
+            {elevated === null ? "Status unknown" : elevated ? "Glint is running as administrator" : "Glint is running normally"}
+          </div>
+          <div className="setting-desc">
+            {elevated
+              ? "Apps that run as administrator are read like any other app. Passwords, secrets and blocked apps are still kept out."
+              : "Some games and tools run as administrator. Windows keeps their screen from Glint, so it records only their name, title and time (a game still counts as play). Restart Glint as administrator to read them fully. Windows will ask you first; this lasts until Glint is closed."}
+          </div>
+          {message && <div className="setting-desc admin-error">{message}</div>}
+        </div>
+        {elevated === false && (
+          <button className="glint-btn" onClick={restart} disabled={busy}>
+            {busy ? "Waiting for Windows…" : "Restart as administrator"}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -333,6 +386,8 @@ function SettingsPage({ appearance, onAppearanceChange }) {
             </button>
           </div>
         </div>
+
+        <AdminCard />
 
         <div className="glint-card">
           <h3>General</h3>

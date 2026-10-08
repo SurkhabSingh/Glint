@@ -105,7 +105,47 @@ public static class ActivityCatalog
             ["spotify"] = (ActivityMode.Watch, ActivityCategory.Music),
             ["applemusic"] = (ActivityMode.Watch, ActivityCategory.Music),
 
+            // Android emulators: whatever runs inside them is a game far more
+            // often than not, and their window is the game itself.
             ["hd-player"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["mumuplayer"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["mumunxdevice"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["mumunxmain"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["nemuplayer"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["dnplayer"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["ldplayer"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["nox"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["memu"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["androidemulatoren"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["androidemulator"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["androidemulatorex"] = (ActivityMode.Play, ActivityCategory.Game),
+
+            // Console emulators.
+            ["ryujinx"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["yuzu"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["suyu"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["citron"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["dolphin"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["pcsx2"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["pcsx2-qt"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["rpcs3"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["retroarch"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["cemu"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["ppssppwindows64"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["ppssppwindows"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["citra-qt"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["lime3ds"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["azahar"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["melonds"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["xenia"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["xenia_canary"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["xemu"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["vita3k"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["shadps4"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["mgba"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["snes9x-x64"] = (ActivityMode.Play, ActivityCategory.Game),
+            ["mesen"] = (ActivityMode.Play, ActivityCategory.Game),
+
             ["osu!"] = (ActivityMode.Play, ActivityCategory.Game),
             ["robloxplayerbeta"] = (ActivityMode.Play, ActivityCategory.Game),
             ["minecraft.windows"] = (ActivityMode.Play, ActivityCategory.Game),
@@ -207,8 +247,34 @@ public static class ActivityCatalog
         @"\ubisoft game launcher\games\",
         @"\ea games\",
         @"\battle.net\",
-        @"\bluestacks"
+        @"\bluestacks",
+        @"\origin games\",
+        @"\rockstar games\",
+        @"\amazon games\library\",
+        @"\itch\apps\",
+        @"\hoyoplay\games\",
+        @"\netease\mumuplayer",
+        @"\emulators\",
+        // A drive-level games folder: D:\Games\..., E:\Games\...
+        @":\games\"
     ];
+
+    /// Name prefixes of emulators with versioned builds
+    /// ("duckstation-qt-x64-ReleaseLTCG"): matched by start, not exactly.
+    private static readonly string[] EmulatorPrefixes =
+    [
+        "duckstation", "pcsx2", "ppsspp", "citra", "dolphin", "rpcs3", "ryujinx",
+        "xenia", "mumu", "ldplayer", "bluestacks"
+    ];
+
+    /// Whether this process is an emulator, by name prefix.
+    public static bool IsEmulator(string processName) =>
+        !string.IsNullOrWhiteSpace(processName)
+        && EmulatorPrefixes.Any(prefix => processName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        && !processName.Contains("installer", StringComparison.OrdinalIgnoreCase)
+        && !processName.Contains("setup", StringComparison.OrdinalIgnoreCase)
+        && !processName.Contains("service", StringComparison.OrdinalIgnoreCase)
+        && !processName.Contains("vmm", StringComparison.OrdinalIgnoreCase);
 
     /// Files an app is "making": creative work tracked by file, not text.
     private static readonly string[] MakeExtensions =

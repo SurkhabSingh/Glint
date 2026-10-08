@@ -2,6 +2,16 @@ namespace Glint.Phase0.Core;
 
 public sealed class PrivacyGate
 {
+    private readonly bool _selfElevated;
+
+    /// <param name="selfElevated">Whether Glint itself runs as administrator;
+    /// defaults to the current process. When it does, apps running as
+    /// administrator are read like any other app.</param>
+    public PrivacyGate(bool? selfElevated = null)
+    {
+        _selfElevated = selfElevated ?? Environment.IsPrivilegedProcess;
+    }
+
     private static readonly HashSet<string> BlockedProcesses = new(StringComparer.OrdinalIgnoreCase)
     {
         "1Password",
@@ -113,13 +123,6 @@ public sealed class PrivacyGate
                 "target process elevation could not be verified");
         }
 
-        if (window.IsElevated)
-        {
-            return PrivacyDecision.Suppress(
-                SuppressReason.ElevatedProcess,
-                "capture is disabled for elevated applications");
-        }
-
         if (window.IsDisplayProtected)
         {
             return PrivacyDecision.Suppress(
@@ -151,6 +154,18 @@ public sealed class PrivacyGate
             return PrivacyDecision.Suppress(
                 SuppressReason.SensitiveWindowTitle,
                 "window title indicates a sensitive file or secret");
+        }
+
+        // An app running as administrator, seen from a Glint that isn't: its
+        // screen and text are out of reach (Windows blocks both), but its
+        // name and title are not. Checked after every rule about the app and
+        // title, so a blocked or private app stays blocked; the caller keeps
+        // the name, title and time.
+        if (window.IsElevated && !_selfElevated)
+        {
+            return PrivacyDecision.Suppress(
+                SuppressReason.ElevatedProcess,
+                "runs as administrator: name and title only (restart Glint as administrator to read its screen)");
         }
 
         if (!automation.Determined || !automation.BelongsToForegroundProcess)

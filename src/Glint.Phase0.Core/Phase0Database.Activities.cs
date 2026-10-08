@@ -137,6 +137,19 @@ public sealed partial class Phase0Database
                 VALUES (12, CAST(unixepoch('subsec') * 1000 AS INTEGER));
                 """);
         }
+
+        // Version 13: emulators and games started by a launcher are games,
+        // including time recorded before they were recognized. Rebuild once.
+        version.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE version = 13);";
+        if (Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) == 0)
+        {
+            Execute(
+                """
+                UPDATE activity_sessions SET activities_built = 0 WHERE status = 'Closed';
+                INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
+                VALUES (13, CAST(unixepoch('subsec') * 1000 AS INTEGER));
+                """);
+        }
     }
 
     private void EnsureColumn(string table, string column, string definition)
@@ -192,6 +205,15 @@ public sealed partial class Phase0Database
     public void UpsertAppProfile(AppProfile profile)
     {
         ArgumentNullException.ThrowIfNull(profile);
+        // An app newly recognized as a game was recorded as something else
+        // until now (or, running as administrator, as private time): rebuild
+        // once so its earlier time shows as play too.
+        var before = GetAppProfile(profile.Key);
+        if (profile.Mode == ActivityMode.Play && before?.Mode != ActivityMode.Play)
+        {
+            Execute("UPDATE activity_sessions SET activities_built = 0 WHERE status = 'Closed';");
+        }
+
         using var command = _connection.CreateCommand();
         command.CommandText =
             """

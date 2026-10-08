@@ -81,7 +81,10 @@ public sealed class ActivityIdentityResolver
             decided = new(key, displayName, known.Mode, known.Category, ModeSource.Catalog);
         }
         else if (ActivityCatalog.IsInGameFolder(window.ExecutablePath)
-                 || ActivityCatalog.IsKnownToGameBar(window.ExecutablePath))
+                 || ActivityCatalog.IsKnownToGameBar(window.ExecutablePath)
+                 || ActivityCatalog.IsEmulator(window.ProcessName)
+                 || GameSignals.LooksLikeGameInstall(window.ExecutablePath)
+                 || GameSignals.LaunchedByGameLauncher(window.ProcessId, window.ProcessName))
         {
             decided = new(key, displayName, ActivityMode.Play, ActivityCategory.Game, ModeSource.Catalog);
         }

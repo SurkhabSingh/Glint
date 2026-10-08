@@ -559,6 +559,58 @@ pub fn glint_activities(app: AppHandle, limit: Option<u32>) -> Result<serde_json
     Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
 }
 
+/// Whether Glint is running as administrator. Apps that run as
+/// administrator can only be read by a Glint that does too; otherwise only
+/// their name and title are recorded.
+#[tauri::command]
+pub fn glint_admin_status() -> serde_json::Value {
+    // SAFETY: no arguments; reads the current process token.
+    let elevated = unsafe { windows::Win32::UI::Shell::IsUserAnAdmin() }.as_bool();
+    serde_json::json!({ "elevated": elevated })
+}
+
+/// Restart Glint as administrator. Windows shows its own consent prompt; if
+/// the user declines, nothing changes and this Glint keeps running.
+#[tauri::command]
+pub fn glint_restart_as_admin(app: AppHandle) -> Result<(), String> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let args = std::env::args()
+        .skip(1)
+        .map(|arg| {
+            if arg.contains(' ') {
+                format!("\"{arg}\"")
+            } else {
+                arg
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let verb = HSTRING::from("runas");
+    let file = HSTRING::from(exe.as_os_str());
+    let params = HSTRING::from(args);
+    // SAFETY: all strings outlive the call; no window handle is passed.
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR(params.as_ptr()),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecute reports success as a value above 32.
+    if (result.0 as isize) <= 32 {
+        return Err("Glint was not restarted (the administrator prompt was declined or failed).".to_string());
+    }
+    app.exit(0);
+    Ok(())
+}
+
 /// Native page zoom for the dashboard window (WebView2 zoom, like Ctrl +/-
 /// in a browser): everything scales, layout reflows. The command bar keeps
 /// 100% because its window has a fixed size.

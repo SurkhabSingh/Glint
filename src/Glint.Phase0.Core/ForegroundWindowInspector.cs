@@ -109,7 +109,9 @@ public sealed class ForegroundWindowInspector : IForegroundWindowInspector
             catch (Exception error) when (
                 error is InvalidOperationException or System.ComponentModel.Win32Exception)
             {
-                executablePath = null;
+                // Reading the main module needs more access than Windows gives
+                // for an app running as administrator; the image name does not.
+                executablePath = ImagePathOf(processId);
             }
         }
         catch (ArgumentException)
@@ -141,6 +143,28 @@ public sealed class ForegroundWindowInspector : IForegroundWindowInspector
             desktopDetermined,
             IsSelfProcess(processId, Environment.ProcessId, _hostProcessId),
             IsFullscreen: CoversMonitor(handle, bounds));
+    }
+
+    private static string? ImagePathOf(uint processId)
+    {
+        var process = NativeMethods.OpenProcess(NativeMethods.ProcessQueryLimitedInformation, false, processId);
+        if (process == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            var buffer = new StringBuilder(1024);
+            var size = (uint)buffer.Capacity;
+            return NativeMethods.QueryFullProcessImageName(process, 0, buffer, ref size) && size > 0
+                ? buffer.ToString(0, (int)size)
+                : null;
+        }
+        finally
+        {
+            _ = NativeMethods.CloseHandle(process);
+        }
     }
 
     internal static bool IsSelfProcess(uint processId, int currentProcessId, int? hostProcessId) =>

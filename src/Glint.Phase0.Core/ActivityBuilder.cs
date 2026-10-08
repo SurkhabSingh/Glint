@@ -177,6 +177,28 @@ public sealed class ActivityBuilder
             ? userSite
             : userApp?.Source == ModeSource.User && facet.Site is null ? userApp : null;
 
+        // Recognized as a game since this look was stored: an emulator, a
+        // launcher-started game, or a game that ran as administrator and was
+        // kept as private time. Shown as play now, named by the app.
+        var gameNow = userOverride is null
+            && facet.Site is null
+            && facet.Mode is { } recorded
+            && recorded != ActivityMode.Play
+            && (ActivityCatalog.ForProcess(facet.ProcessName) is { Mode: ActivityMode.Play }
+                || ActivityCatalog.IsEmulator(facet.ProcessName)
+                || userApp is { Mode: ActivityMode.Play, Source: not ModeSource.Provisional });
+        if (gameNow)
+        {
+            return ActivityIdentityResolver.Compose(
+                facet.ProcessName,
+                userApp?.DisplayName ?? facet.AppName ?? facet.ProcessName,
+                facet.Mode == ActivityMode.Private ? string.Empty : facet.WindowTitle,
+                null,
+                ActivityMode.Play,
+                ActivityCategory.Game,
+                constants.GetValueOrDefault(facet.ProcessName));
+        }
+
         if (facet.PageKey is not null && facet.Mode is { } storedMode && userOverride is null)
         {
             return new PageIdentity(
@@ -208,7 +230,9 @@ public sealed class ActivityBuilder
         }
 
         var inGameFolder = ActivityCatalog.IsInGameFolder(facet.ExecutablePath)
-            || ActivityCatalog.IsKnownToGameBar(facet.ExecutablePath);
+            || ActivityCatalog.IsKnownToGameBar(facet.ExecutablePath)
+            || ActivityCatalog.IsEmulator(facet.ProcessName)
+            || GameSignals.LooksLikeGameInstall(facet.ExecutablePath);
         var known = userOverride is not null
             ? (userOverride.Mode, userOverride.Category)
             : ActivityCatalog.ForSite(facet.Site)

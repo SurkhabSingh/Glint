@@ -13,6 +13,43 @@ internal static class NativeMethods
     internal const int UoiName = 2;
     internal const uint WdaNone = 0x00000000;
 
+    internal const uint Th32csSnapProcess = 0x00000002;
+
+    /// The full path of a process's executable. Works with only
+    /// PROCESS_QUERY_LIMITED_INFORMATION, so it also answers for processes
+    /// running as administrator, where reading the main module is refused.
+    [DllImport("kernel32.dll", EntryPoint = "QueryFullProcessImageNameW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool QueryFullProcessImageName(nint process, uint flags, StringBuilder name, ref uint size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern nint CreateToolhelp32Snapshot(uint flags, uint processId);
+
+    [DllImport("kernel32.dll", EntryPoint = "Process32FirstW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool Process32First(nint snapshot, ref ProcessEntry32 entry);
+
+    [DllImport("kernel32.dll", EntryPoint = "Process32NextW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool Process32Next(nint snapshot, ref ProcessEntry32 entry);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    internal struct ProcessEntry32
+    {
+        internal uint Size;
+        internal uint Usage;
+        internal uint ProcessId;
+        internal nint DefaultHeapId;
+        internal uint ModuleId;
+        internal uint Threads;
+        internal uint ParentProcessId;
+        internal int PriorityClassBase;
+        internal uint Flags;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        internal string ExeFile;
+    }
+
     [DllImport("user32.dll")]
     internal static extern nint GetForegroundWindow();
 

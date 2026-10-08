@@ -30,7 +30,6 @@ public sealed class ActivityScanCoordinator
         SuppressReason.BlocklistedApplication,
         SuppressReason.PrivateBrowsing,
         SuppressReason.SensitiveWindowTitle,
-        SuppressReason.ElevatedProcess,
         SuppressReason.DisplayProtected,
         SuppressReason.PasswordField
     ];
@@ -88,6 +87,11 @@ public sealed class ActivityScanCoordinator
 
             var security = _automation.ProbeSecurity(window);
             var decision = _privacyGate.Evaluate(window, security);
+            if (!decision.Allowed && decision.Reason == SuppressReason.ElevatedProcess && !window.IsSelf)
+            {
+                return LookElevated(window, now);
+            }
+
             if (!decision.Allowed)
             {
                 if (decision.Reason is { } reason && RecordAsPrivate.Contains(reason) && !window.IsSelf)
@@ -146,6 +150,55 @@ public sealed class ActivityScanCoordinator
                 ManualScanOutcomeKind.Failed,
                 $"{error.GetType().Name}: {error.Message}");
         }
+    }
+
+    /// <summary>
+    /// An app running as administrator while Glint is not. Windows keeps its
+    /// screen and text out of reach, but its name, file and title are enough
+    /// to know what it is: a game is a game, a file being edited is that
+    /// file. Recorded as presence with the title, never with content.
+    /// </summary>
+    private ManualScanOutcome LookElevated(ForegroundWindowInfo window, long now)
+    {
+        window = window with
+        {
+            Title = _redactor.Redact(window.Title).Text,
+            DialogTitle = window.DialogTitle is null ? null : _redactor.Redact(window.DialogTitle).Text
+        };
+        var app = _resolver.ResolveApp(window, now);
+        var identity = _resolver.Identify(window, app, null, null);
+        if (identity.Mode == ActivityMode.Private)
+        {
+            RecordPrivatePresence(window, now, eventKind: null, identity);
+            return new(
+                ManualScanOutcomeKind.Completed,
+                "Private: time only.",
+                Mode: ActivityMode.Private,
+                Change: CaptureChange.Presence);
+        }
+
+        if (identity.Mode == ActivityMode.Make)
+        {
+            // Saves and exports show in the title and dialogs, which are readable.
+            return LookMake(window, identity, now);
+        }
+
+        var latest = _store.GetLatestFacet();
+        var continuing = Continues(latest, identity.Key, now);
+        if (continuing)
+        {
+            _store.TouchScan(latest!.Id, now);
+        }
+        else
+        {
+            SavePresence(window, identity, now, eventKind: null);
+        }
+
+        return new(
+            continuing ? ManualScanOutcomeKind.Unchanged : ManualScanOutcomeKind.Completed,
+            $"{identity.Mode}: {identity.Subject} (runs as administrator: name and title only).",
+            Mode: identity.Mode,
+            Change: CaptureChange.Presence);
     }
 
     /// <summary>

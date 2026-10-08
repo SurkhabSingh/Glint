@@ -316,6 +316,8 @@ pub fn run() {
             glint::glint_set_glass_tint,
             glint::glint_usage,
             glint::glint_set_zoom,
+            glint::glint_admin_status,
+            glint::glint_restart_as_admin,
             glint::glint_timeline,
             glint::glint_shortcut_status,
             glint::glint_ask,

@@ -33,7 +33,7 @@ public sealed class ActivityPipelineTests : IDisposable
             _inspector,
             _automation,
             _pages,
-            new PrivacyGate(),
+            new PrivacyGate(selfElevated: false),
             _frames,
             new DeterministicRedactor(),
             _database,
@@ -401,6 +401,74 @@ public sealed class ActivityPipelineTests : IDisposable
         var scans = _database.GetRecentManualScans(10);
         Assert.Equal(2, scans.Count);
         Assert.Equal(T0, scans[1].LastSeenMilliseconds);
+    }
+
+    [Fact]
+    public async Task AGameRunningAsAdministratorIsPlayWithItsName()
+    {
+        _inspector.Window = Window("P4G", "P4G") with
+        {
+            IsElevated = true,
+            ExecutablePath = @"D:\SteamLibrary\steamapps\common\Persona 4 Golden\P4G.exe"
+        };
+        var coordinator = Coordinator();
+
+        var first = await coordinator.ScanAsync();
+        _now += 30_000;
+        var again = await coordinator.ScanAsync();
+
+        Assert.Equal(ActivityMode.Play, first.Mode);
+        Assert.Equal(ManualScanOutcomeKind.Unchanged, again.Kind);
+        // Windows keeps an admin app's screen from a Glint that isn't: nothing is tried.
+        Assert.Equal(0, _frames.Captures);
+        Assert.Equal(0, _pages.Probes);
+        Assert.False(_automation.TextWasRead);
+        var scan = Assert.Single(_database.GetRecentManualScans(10));
+        Assert.Equal("P4G", scan.WindowTitle);
+        Assert.Equal(T0 + 30_000, scan.LastSeenMilliseconds);
+    }
+
+    [Fact]
+    public async Task TimeKeptPrivateBeforeAGameWasRecognizedBecomesPlay()
+    {
+        // Recorded as private time (the game hid its window from capture).
+        _inspector.Window = Window("P4G", "P4G") with { IsDisplayProtected = true };
+        var coordinator = Coordinator();
+        await coordinator.ScanAsync();
+
+        // Later the same game is seen with its Steam folder.
+        _now += 60_000;
+        _inspector.Window = Window("P4G", "P4G") with
+        {
+            ExecutablePath = @"D:\SteamLibrary\steamapps\common\Persona 4 Golden\P4G.exe"
+        };
+        await coordinator.ScanAsync();
+        _now += 600_000;
+        await coordinator.ScanAsync();
+
+        await new SessionBuilder(_database, new UnusedSummarizer(), summarizeSessions: false)
+            .RunAsync(_now + Sessionizer.QuietTailMilliseconds);
+        await new ActivityBuilder(_database, _database, null).RunAsync();
+
+        var game = Assert.Single(_database.GetRecentActivities());
+        Assert.Equal(ActivityMode.Play, game.Mode);
+        Assert.Equal(ActivityCategory.Game, game.Category);
+    }
+
+    [Fact]
+    public async Task AnAndroidEmulatorIsAGameAndNeverRead()
+    {
+        _inspector.Window = Window("MuMuNxDevice", "Pokémon TCG Pocket");
+        _pages.Text = "Open booster pack\nGenetic Apex";
+
+        var outcome = await Coordinator().ScanAsync();
+
+        Assert.Equal(ActivityMode.Play, outcome.Mode);
+        Assert.Equal(0, _pages.Reads);
+        Assert.False(_automation.TextWasRead);
+        Assert.Equal(ActivityMode.Play, ActivityCatalog.ForProcess("MuMuNxDevice")?.Mode);
+        Assert.True(ActivityCatalog.IsEmulator("duckstation-qt-x64-ReleaseLTCG"));
+        Assert.False(ActivityCatalog.IsEmulator("MuMuVMMSVC"));
     }
 
     [Fact]
