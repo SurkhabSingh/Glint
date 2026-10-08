@@ -180,7 +180,7 @@ function DashboardPage() {
       // An older CLI prints its help for a verb it doesn't know.
       setError(
         /no JSON output/i.test(message)
-          ? "Glint's background tool is older than this screen. Close Glint, run `dotnet build src/Glint.Phase0.Cli -c Release`, then reopen it."
+          ? "Glint's background tool is older than this screen. Restart Glint and it rebuilds itself (or run `dotnet build src/Glint.Phase0.Cli -c Release` from the repo)."
           : message,
       );
     } finally {

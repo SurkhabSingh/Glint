@@ -92,9 +92,71 @@ fn candidate_cli_paths(app: &AppHandle) -> Vec<PathBuf> {
     paths
 }
 
+/// Held while `refresh_dev_cli` rebuilds the CLI; `sidecar_path` waits on it.
+static DEV_CLI_BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The newest modification time of the C# sources the CLI is built from.
+fn newest_cli_source(dir: &std::path::Path, depth: u8) -> Option<std::time::SystemTime> {
+    let mut newest = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if path.is_dir() {
+            if depth > 0 && name != "bin" && name != "obj" {
+                newest = newest.max(newest_cli_source(&path, depth - 1));
+            }
+        } else if name.ends_with(".cs") || name.ends_with(".csproj") {
+            newest = newest.max(entry.metadata().and_then(|m| m.modified()).ok());
+        }
+    }
+    newest
+}
+
+/// Developer builds only: rebuild the CLI (Release) when its C# sources are
+/// newer than the built DLL, so `npm run tauri dev` never runs a CLI that is
+/// missing verbs the UI already uses. Blocks sidecar launches while building.
+/// Failures are logged, not fatal: the existing CLI keeps working.
+#[cfg(debug_assertions)]
+pub fn refresh_dev_cli() {
+    let _guard = DEV_CLI_BUILD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let built = dev_cli_dir()
+        .join("Release")
+        .join("net9.0-windows10.0.22621.0")
+        .join("Glint.Phase0.Cli.dll");
+    let built_at = std::fs::metadata(&built).and_then(|m| m.modified()).ok();
+    let sources = newest_cli_source(&src.join("Glint.Phase0.Core"), 4)
+        .max(newest_cli_source(&src.join("Glint.Phase0.Cli"), 4));
+    let stale = match (built_at, sources) {
+        (None, _) => true,
+        (Some(built), Some(source)) => source > built,
+        (Some(_), None) => false,
+    };
+    if !stale {
+        return;
+    }
+    eprintln!("Glint: CLI sources changed; rebuilding Glint.Phase0.Cli (Release)...");
+    let result = hidden_command("dotnet")
+        .args(["build", "Glint.Phase0.Cli", "-c", "Release", "-nologo", "-v", "q"])
+        .current_dir(&src)
+        .output();
+    match result {
+        Ok(output) if output.status.success() => eprintln!("Glint: CLI rebuilt."),
+        Ok(output) => eprintln!(
+            "Glint: CLI rebuild failed; using the existing build.
+{}",
+            String::from_utf8_lossy(&output.stdout).trim()
+        ),
+        Err(error) => eprintln!("Glint: could not run dotnet to rebuild the CLI: {error}"),
+    }
+}
+
 /// Locate the CLI sidecar, probing ship locations first and the developer
 /// build output (`src/Glint.Phase0.Cli/bin/...`) as a fallback.
 pub fn sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
+    // While a developer rebuild of the CLI is running, wait for it rather
+    // than launching a half-written or stale executable.
+    drop(DEV_CLI_BUILD.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
     if let Ok(dir) = std::env::var("GLINT_CLI_PATH") {
         let custom = PathBuf::from(dir.trim());
         if custom.is_file() {

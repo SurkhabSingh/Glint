@@ -251,6 +251,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(shortcut_plugin())
         .setup(|app| {
+            // Developer runs rebuild a stale CLI before anything calls it
+            // (only when its C# sources changed; a few seconds when they did).
+            #[cfg(debug_assertions)]
+            crate::bridge::refresh_dev_cli();
             register_scan_hotkeys(app.handle());
             // Pin LiteRT python/worker env for every sidecar this process
             // spawns (tray and hotkey actions included).
