@@ -138,6 +138,15 @@ public sealed partial class Phase0Database
                 """);
         }
 
+        // Version 14: markers for locking, sleep, shutdown and closed apps (the
+        // old table only allowed four kinds), and summaries written while
+        // recording, for activities that ended before their session did.
+        version.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE version = 14);";
+        if (Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) == 0)
+        {
+            MigrateToVersion14();
+        }
+
         // Version 13: emulators and games started by a launcher are games,
         // including time recorded before they were recognized. Rebuild once.
         version.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE version = 13);";
@@ -152,6 +161,91 @@ public sealed partial class Phase0Database
         }
     }
 
+    /// <summary>
+    /// Version 14, done so it can never be left half applied. Several Glint
+    /// processes open the database at once (a capture, a summary pass, Ask),
+    /// so the whole change runs in one write transaction taken up front: a
+    /// second process waits, then sees the version row and does nothing.
+    /// It also repairs a store left half migrated by the first version of
+    /// this upgrade, which ran its steps one by one.
+    /// </summary>
+    private void MigrateToVersion14()
+    {
+        using var transaction = _connection.BeginTransaction(deferred: false);
+
+        void Run(string sql)
+        {
+            using var command = _connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = sql;
+            command.ExecuteNonQuery();
+        }
+
+        long Scalar(string sql)
+        {
+            using var command = _connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = sql;
+            return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        // Another process finished it while this one waited for the lock.
+        if (Scalar("SELECT EXISTS(SELECT 1 FROM schema_version WHERE version = 14);") != 0)
+        {
+            transaction.Commit();
+            return;
+        }
+
+        var hasDetail = Scalar("SELECT COUNT(*) FROM pragma_table_info('activity_markers') WHERE name = 'detail';") != 0;
+        if (!hasDetail)
+        {
+            // A copy from an interrupted attempt holds nothing the original lacks.
+            Run(
+                """
+                DROP TABLE IF EXISTS activity_markers_v14;
+                CREATE TABLE activity_markers_v14 (
+                    id INTEGER PRIMARY KEY,
+                    ts_ms INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    detail TEXT
+                ) STRICT;
+                INSERT INTO activity_markers_v14 (id, ts_ms, kind)
+                    SELECT id, ts_ms, kind FROM activity_markers;
+                DROP TABLE activity_markers;
+                ALTER TABLE activity_markers_v14 RENAME TO activity_markers;
+                """);
+        }
+        else
+        {
+            Run("DROP TABLE IF EXISTS activity_markers_v14;");
+        }
+
+        Run(
+            """
+            CREATE INDEX IF NOT EXISTS idx_activity_markers_ts ON activity_markers(ts_ms);
+
+            CREATE TABLE IF NOT EXISTS early_narrations (
+                activity_key TEXT NOT NULL,
+                started_at_ms INTEGER NOT NULL,
+                ended_at_ms INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                summary TEXT,
+                task TEXT,
+                task_status TEXT NOT NULL,
+                check_state TEXT NOT NULL,
+                facts_kept INTEGER NOT NULL,
+                facts_dropped INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (activity_key, started_at_ms)
+            ) STRICT;
+
+            UPDATE activity_sessions SET activities_built = 0 WHERE status = 'Closed';
+            INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
+            VALUES (14, CAST(unixepoch('subsec') * 1000 AS INTEGER));
+            """);
+        transaction.Commit();
+    }
+
     private void EnsureColumn(string table, string column, string definition)
     {
         // Table and column names come only from the constants above, never
@@ -164,7 +258,15 @@ public sealed partial class Phase0Database
             return;
         }
 
-        Execute($"ALTER TABLE {table} ADD COLUMN {column} {definition};");
+        try
+        {
+            Execute($"ALTER TABLE {table} ADD COLUMN {column} {definition};");
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException error)
+            when (error.Message.Contains("duplicate column", StringComparison.OrdinalIgnoreCase))
+        {
+            // Another Glint process added it between the check and the change.
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -679,6 +781,14 @@ public sealed partial class Phase0Database
         foreach (var activity in activities)
         {
             var kept = activity;
+            if (kept.Check == SummaryCheck.Pending
+                && !previous.ContainsKey($"{activity.Key}@{activity.StartedAtMilliseconds}")
+                && TakeEarlyNarration(activity, transaction) is { } early)
+            {
+                // Summarized while recording, as soon as it ended.
+                kept = early;
+            }
+
             if (previous.TryGetValue($"{activity.Key}@{activity.StartedAtMilliseconds}", out var old))
             {
                 kept = kept with { Id = old.Id };
@@ -716,6 +826,155 @@ public sealed partial class Phase0Database
         }
 
         transaction.Commit();
+    }
+
+    /// <summary>
+    /// A summary written while recording, for an activity that ended before
+    /// its session did. Kept until the session is sealed, then moved onto
+    /// the stored activity.
+    /// </summary>
+    public void SaveEarlyNarration(ActivityRecord activity, long nowMilliseconds)
+    {
+        ArgumentNullException.ThrowIfNull(activity);
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            INSERT INTO early_narrations
+                (activity_key, started_at_ms, ended_at_ms, label, summary, task, task_status,
+                 check_state, facts_kept, facts_dropped, created_at_ms)
+            VALUES ($key, $start, $end, $label, $summary, $task, $taskStatus,
+                    $check, $kept, $dropped, $now)
+            ON CONFLICT(activity_key, started_at_ms) DO UPDATE SET
+                ended_at_ms = excluded.ended_at_ms, label = excluded.label,
+                summary = excluded.summary, task = excluded.task,
+                task_status = excluded.task_status, check_state = excluded.check_state,
+                facts_kept = excluded.facts_kept, facts_dropped = excluded.facts_dropped,
+                created_at_ms = excluded.created_at_ms;
+            """;
+        command.Parameters.AddWithValue("$key", activity.Key);
+        command.Parameters.AddWithValue("$start", activity.StartedAtMilliseconds);
+        command.Parameters.AddWithValue("$end", activity.EndedAtMilliseconds);
+        command.Parameters.AddWithValue("$label", activity.Label);
+        command.Parameters.AddWithValue("$summary", (object?)activity.Summary ?? DBNull.Value);
+        command.Parameters.AddWithValue("$task", (object?)activity.Task ?? DBNull.Value);
+        command.Parameters.AddWithValue("$taskStatus", activity.TaskStatus.ToString());
+        command.Parameters.AddWithValue("$check", activity.Check.ToString());
+        command.Parameters.AddWithValue("$kept", activity.FactsKept);
+        command.Parameters.AddWithValue("$dropped", activity.FactsDropped);
+        command.Parameters.AddWithValue("$now", nowMilliseconds);
+        command.ExecuteNonQuery();
+    }
+
+    /// Whether this activity, as it stands, already has an early summary.
+    public bool HasEarlyNarration(ActivityRecord activity)
+    {
+        ArgumentNullException.ThrowIfNull(activity);
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT ended_at_ms FROM early_narrations
+            WHERE activity_key = $key AND started_at_ms = $start;
+            """;
+        command.Parameters.AddWithValue("$key", activity.Key);
+        command.Parameters.AddWithValue("$start", activity.StartedAtMilliseconds);
+        var ended = command.ExecuteScalar();
+        return ended is long end && Math.Abs(end - activity.EndedAtMilliseconds) <= ActivitySegmenter.FillGapUpToMilliseconds;
+    }
+
+    /// <summary>
+    /// The early summary for this activity, removed from the waiting list.
+    /// Only used when the activity still ends where it did when it was
+    /// summarized (within the fill-gap allowance): one that grew since has
+    /// more text, and is summarized again from all of it.
+    /// </summary>
+    private ActivityRecord? TakeEarlyNarration(ActivityRecord activity, Microsoft.Data.Sqlite.SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            SELECT ended_at_ms, label, summary, task, task_status, check_state, facts_kept, facts_dropped
+            FROM early_narrations
+            WHERE activity_key = $key AND started_at_ms = $start;
+            """;
+        command.Parameters.AddWithValue("$key", activity.Key);
+        command.Parameters.AddWithValue("$start", activity.StartedAtMilliseconds);
+        ActivityRecord? taken = null;
+        using (var reader = command.ExecuteReader())
+        {
+            if (reader.Read()
+                && Math.Abs(reader.GetInt64(0) - activity.EndedAtMilliseconds) <= ActivitySegmenter.FillGapUpToMilliseconds)
+            {
+                taken = activity with
+                {
+                    Label = reader.GetString(1),
+                    Summary = reader.IsDBNull(2) ? null : reader.GetString(2),
+                    Task = reader.IsDBNull(3) ? null : reader.GetString(3),
+                    TaskStatus = Enum.TryParse<ActivityTaskStatus>(reader.GetString(4), out var status) ? status : ActivityTaskStatus.None,
+                    Check = Enum.TryParse<SummaryCheck>(reader.GetString(5), out var check) ? check : SummaryCheck.Pending,
+                    FactsKept = reader.GetInt32(6),
+                    FactsDropped = reader.GetInt32(7)
+                };
+            }
+        }
+
+        using var delete = _connection.CreateCommand();
+        delete.Transaction = transaction;
+        delete.CommandText = "DELETE FROM early_narrations WHERE activity_key = $key AND started_at_ms = $start;";
+        delete.Parameters.AddWithValue("$key", activity.Key);
+        delete.Parameters.AddWithValue("$start", activity.StartedAtMilliseconds);
+        delete.ExecuteNonQuery();
+        return taken;
+    }
+
+    /// <summary>
+    /// After a crash or a shutdown the last recording never got its stop. If
+    /// the newest run marker is a start with no stop after it, the run is
+    /// closed at the last moment anything was seen, so it can be sealed and
+    /// summarized. Returns whether anything was waiting to be processed.
+    /// </summary>
+    public RecoveryResult RecoverUnfinishedRun(long nowMilliseconds)
+    {
+        string? lastKind = null;
+        long lastAt = 0;
+        using (var command = _connection.CreateCommand())
+        {
+            command.CommandText =
+                """
+                SELECT kind, ts_ms FROM activity_markers
+                WHERE kind IN ('run.started', 'run.stopped', 'system.shutdown')
+                ORDER BY ts_ms DESC, id DESC LIMIT 1;
+                """;
+            using var reader = command.ExecuteReader();
+            if (reader.Read())
+            {
+                lastKind = reader.GetString(0);
+                lastAt = reader.GetInt64(1);
+            }
+        }
+
+        var closed = false;
+        long? closedAt = null;
+        if (lastKind is "run.started" or "system.shutdown")
+        {
+            using var seen = _connection.CreateCommand();
+            seen.CommandText =
+                "SELECT MAX(COALESCE(last_seen_ms, captured_at_ms)) FROM manual_scans WHERE captured_at_ms >= $from;";
+            seen.Parameters.AddWithValue("$from", lastAt);
+            var lastSeen = seen.ExecuteScalar() is long value ? value : lastAt;
+            closedAt = Math.Min(Math.Max(lastSeen, lastAt), nowMilliseconds);
+            RecordMarker("run.stopped", closedAt.Value);
+            closed = true;
+        }
+
+        using var waiting = _connection.CreateCommand();
+        waiting.CommandText =
+            """
+            SELECT (SELECT COUNT(*) FROM manual_scans WHERE session_id IS NULL)
+                 + (SELECT COUNT(*) FROM activities WHERE check_state = 'Pending');
+            """;
+        var pending = Convert.ToInt64(waiting.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+        return new RecoveryResult(closed, closedAt, pending);
     }
 
     public IReadOnlyList<ActivityRecord> GetActivitiesPendingNarration(int limit = 10)

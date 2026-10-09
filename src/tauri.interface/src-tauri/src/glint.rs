@@ -717,10 +717,35 @@ pub async fn glint_set_app_mode(
 /// that simply did not change. Best effort: a lost marker only costs the
 /// fallback gap rule, so it never blocks the loop.
 fn record_marker(app: &AppHandle, kind: &'static str) {
+    record_marker_detail(app, kind, None);
+}
+
+fn record_marker_detail(app: &AppHandle, kind: &str, detail: Option<&str>) {
+    // Through the capture worker: no process start, no database unlock.
+    // Stamped here, so the marker keeps its moment even if the worker is busy.
+    let at = chrono::Utc::now().timestamp_millis();
+    let mut request = serde_json::json!({ "op": "mark", "kind": kind, "at": at });
+    if let Some(detail) = detail {
+        request["detail"] = serde_json::Value::String(detail.to_string());
+    }
+    if crate::scan_server::request_blocking(app, request, crate::scan_server::QUICK_TIMEOUT).is_ok() {
+        return;
+    }
+    // Fallback: a one-off process, as before.
     let Ok(root) = crate::bridge::data_root() else {
         return;
     };
-    let mut args = vec!["mark".to_string(), "--kind".to_string(), kind.to_string()];
+    let mut args = vec![
+        "mark".to_string(),
+        "--kind".to_string(),
+        kind.to_string(),
+        "--at".to_string(),
+        at.to_string(),
+    ];
+    if let Some(detail) = detail {
+        args.push("--detail".to_string());
+        args.push(detail.to_string());
+    }
     args.extend(crate::bridge::db_args(app, &root));
     let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
     let _ = crate::bridge::run_sidecar(app, &arg_refs);
@@ -731,10 +756,20 @@ fn record_marker(app: &AppHandle, kind: &'static str) {
 /// Called when a scan stops (`seal_open`), never mid-scan: captures stay
 /// model-free while recording so inference cannot contend with them.
 async fn run_sessionize(app: &AppHandle, seal_open: bool) -> Option<serde_json::Value> {
+    run_sessionize_with(app, seal_open, false).await
+}
+
+/// `ended`: while recording, also summarize activities that have already
+/// ended (closed, or moved on from), a few at a time.
+async fn run_sessionize_with(app: &AppHandle, seal_open: bool, ended: bool) -> Option<serde_json::Value> {
     let root = crate::bridge::data_root().ok()?;
     let cli = crate::bridge::sidecar_path(app).ok()?;
     let mut args = vec!["sessionize".to_string()];
-    if !seal_open {
+    if ended {
+        args.push("--ended".to_string());
+        args.push("--max-summaries".to_string());
+        args.push(ENDED_BATCH.to_string());
+    } else if !seal_open {
         // A rebuild after a correction: segment only, no model calls.
         args.push("--max-summaries".to_string());
         args.push("0".to_string());
@@ -760,7 +795,248 @@ async fn run_sessionize(app: &AppHandle, seal_open: bool) -> Option<serde_json::
         output.status.code().unwrap_or(-1),
         None,
     );
-    serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&output.stdout)).ok()
+    let result = serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&output.stdout)).ok()?;
+    note_ai_backend(&result);
+    Some(result)
+}
+
+/// Summaries per background pass while recording: small, so a pass is a
+/// few seconds on the GPU and never holds the model for long.
+const ENDED_BATCH: u32 = 4;
+
+/// How often recording looks for ended activities to summarize.
+const ENDED_EVERY: std::time::Duration = std::time::Duration::from_secs(90);
+
+static PROCESSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Summarize ended activities in the background, without holding up the
+/// scan loop. At most one pass at a time; a request while one is running is
+/// dropped (the next trigger picks the work up).
+pub(crate) fn process_ended_soon(app: &AppHandle) {
+    use std::sync::atomic::Ordering;
+    if PROCESSING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Some(result) = run_sessionize_with(&app, false, true).await {
+            let busy = result.get("summarized").and_then(|v| v.as_u64()).unwrap_or(0)
+                + result.get("earlyNarrated").and_then(|v| v.as_u64()).unwrap_or(0)
+                + result.get("sealed").and_then(|v| v.as_u64()).unwrap_or(0);
+            if busy > 0 {
+                let _ = app.emit("sessions-updated", &result);
+            }
+        }
+        PROCESSING.store(false, Ordering::SeqCst);
+    });
+}
+
+/// Locking, sleep, shutdown and closed apps, from `system_events`. Runs on
+/// a plain thread (never the async runtime), so the marker write can block.
+pub(crate) fn on_system_event(app: &AppHandle, kind: &str, detail: Option<&str>) {
+    if !scanning_now(app) {
+        return;
+    }
+    record_marker_detail(app, kind, detail);
+    crate::timeline::record_lifecycle(app, kind);
+    match kind {
+        // Something just ended: summarize it now rather than at Stop.
+        "app.closed" | "user.locked" => process_ended_soon(app),
+        // Shutting down: the run never gets its stop. The marker is enough;
+        // startup recovery closes the run and summarizes it. (Sleep only ends
+        // the sitting: recording carries on after waking.)
+        "system.shutdown" => crate::timeline::eon_ended(app),
+        _ => {}
+    }
+}
+
+/// Startup: close a recording a crash or shutdown left open, then group and
+/// summarize whatever is waiting, in the background.
+pub(crate) fn recover_on_startup(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Ok(root) = crate::bridge::data_root() else {
+            return;
+        };
+        let mut args = vec!["recover".to_string()];
+        args.extend(crate::bridge::db_args(&app, &root));
+        let Ok(output) = crate::bridge::run_sidecar_async(&app, &args.iter().map(String::as_str).collect::<Vec<_>>()).await else {
+            return;
+        };
+        let pending = output.json.get("pending").and_then(|v| v.as_u64()).unwrap_or(0);
+        if pending == 0 {
+            return;
+        }
+        for _ in 0..12 {
+            // Recording started in the meantime: Stop will finish the work.
+            if scanning_now(&app) {
+                break;
+            }
+            match run_sessionize(&app, true).await {
+                Some(result) => {
+                    let progressed = result.get("summarized").and_then(|v| v.as_u64()).unwrap_or(0) > 0;
+                    let _ = app.emit("sessions-updated", &result);
+                    if !progressed {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Stutter test mode: turns one suspect off for a run (never saved; back to
+// normal when Glint restarts) and times every look, so a smooth or choppy
+// run comes with numbers.
+// ---------------------------------------------------------------------------
+
+const TEST_MODES: [&str; 4] = ["normal", "no-accessibility", "no-capture", "titles-only"];
+
+#[derive(Default)]
+struct LookStats {
+    looks: u64,
+    total_ms: u64,
+    max_ms: u64,
+    since_ms: i64,
+}
+
+fn look_stats() -> &'static Mutex<LookStats> {
+    static STATS: std::sync::OnceLock<Mutex<LookStats>> = std::sync::OnceLock::new();
+    STATS.get_or_init(|| Mutex::new(LookStats { since_ms: chrono::Utc::now().timestamp_millis(), ..Default::default() }))
+}
+
+fn note_look(ms: u64) {
+    let mut stats = look_stats().lock().unwrap();
+    stats.looks += 1;
+    stats.total_ms += ms;
+    stats.max_ms = stats.max_ms.max(ms);
+}
+
+pub(crate) fn current_test_mode() -> String {
+    std::env::var("GLINT_TEST_MODE")
+        .ok()
+        .filter(|mode| TEST_MODES.contains(&mode.as_str()))
+        .unwrap_or_else(|| "normal".to_string())
+}
+
+fn test_mode_status() -> serde_json::Value {
+    let stats = look_stats().lock().unwrap();
+    serde_json::json!({
+        "mode": current_test_mode(),
+        "looks": stats.looks,
+        "averageMs": if stats.looks == 0 { 0 } else { stats.total_ms / stats.looks },
+        "slowestMs": stats.max_ms,
+        "sinceMs": stats.since_ms,
+    })
+}
+
+/// The stutter test mode and the look timings since it was set.
+#[tauri::command]
+pub fn glint_test_mode() -> serde_json::Value {
+    test_mode_status()
+}
+
+/// Set the stutter test mode for this run and restart the timings. Every
+/// capture started after this uses it; nothing is saved.
+#[tauri::command]
+pub fn glint_set_test_mode(mode: String) -> Result<serde_json::Value, String> {
+    if !TEST_MODES.contains(&mode.as_str()) {
+        return Err(format!("Unknown test mode: {mode}"));
+    }
+    if mode == "normal" {
+        std::env::remove_var("GLINT_TEST_MODE");
+    } else {
+        std::env::set_var("GLINT_TEST_MODE", &mode);
+    }
+    *look_stats().lock().unwrap() = LookStats { since_ms: chrono::Utc::now().timestamp_millis(), ..Default::default() };
+    Ok(test_mode_status())
+}
+
+// ---------------------------------------------------------------------------
+// Where the local AI runs: the user's choice (GPU by default) and what
+// actually happened (the GPU can be missing or fail to load the model).
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct AiBackendSeen {
+    used: Option<String>,
+    gpu_failure: Option<String>,
+}
+
+fn ai_backend_seen() -> &'static Mutex<AiBackendSeen> {
+    static SEEN: std::sync::OnceLock<Mutex<AiBackendSeen>> = std::sync::OnceLock::new();
+    SEEN.get_or_init(|| Mutex::new(AiBackendSeen::default()))
+}
+
+fn note_ai_backend(result: &serde_json::Value) {
+    let mut seen = ai_backend_seen().lock().unwrap();
+    if let Some(used) = result.get("aiBackend").and_then(|v| v.as_str()) {
+        seen.used = Some(used.to_string());
+    }
+    if let Some(failure) = result.get("gpuFailure").and_then(|v| v.as_str()) {
+        seen.gpu_failure = Some(failure.to_string());
+    }
+}
+
+fn settings_path() -> Option<PathBuf> {
+    crate::bridge::data_root().ok().map(|root| root.join("settings.json"))
+}
+
+fn preferred_ai_backend() -> String {
+    settings_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|json| json.get("aiBackend").and_then(|v| v.as_str()).map(str::to_string))
+        .filter(|value| value == "cpu" || value == "gpu")
+        .unwrap_or_else(|| "gpu".to_string())
+}
+
+/// Every CLI this process starts inherits the choice.
+pub(crate) fn apply_ai_backend_env() {
+    std::env::set_var("GLINT_LITERT_BACKEND", preferred_ai_backend());
+}
+
+/// The AI processor setting and what was last used.
+#[tauri::command]
+pub fn glint_ai_backend() -> serde_json::Value {
+    let seen = ai_backend_seen().lock().unwrap();
+    serde_json::json!({
+        "preferred": preferred_ai_backend(),
+        "lastUsed": seen.used,
+        "gpuFailure": seen.gpu_failure,
+    })
+}
+
+/// Choose GPU or CPU for the local AI. Saved, applied to every later model
+/// load, and the answer process restarts on its next question.
+#[tauri::command]
+pub async fn glint_set_ai_backend(app: AppHandle, backend: String) -> Result<serde_json::Value, String> {
+    if backend != "gpu" && backend != "cpu" {
+        return Err(format!("Unknown processor: {backend}"));
+    }
+    let path = settings_path().ok_or("No data folder to save the setting in.")?;
+    let mut settings = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    settings["aiBackend"] = serde_json::Value::String(backend.clone());
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&settings).unwrap_or_default())
+        .map_err(|error| format!("Couldn't save the setting: {error}"))?;
+    std::env::set_var("GLINT_LITERT_BACKEND", &backend);
+    {
+        let mut seen = ai_backend_seen().lock().unwrap();
+        *seen = AiBackendSeen::default();
+    }
+    // The answer process holds a model loaded on the old processor.
+    let server: State<AskServer> = app.state();
+    *server.process.lock().await = None;
+    Ok(glint_ai_backend())
 }
 
 fn manual_scan_args(app: &AppHandle, root: &std::path::Path) -> Result<(PathBuf, Vec<String>), String> {
@@ -771,16 +1047,49 @@ fn manual_scan_args(app: &AppHandle, root: &std::path::Path) -> Result<(PathBuf,
     Ok((cli, args))
 }
 
+/// One look, through the capture worker. Pause abandons the wait at once;
+/// the worker finishes that look on its own and its late reply is skipped.
+/// If the worker cannot run at all, falls back to a one-off process.
 async fn run_manual_scan(
+    app: &AppHandle,
+    generation: u64,
+) -> Option<serde_json::Value> {
+    let started = std::time::Instant::now();
+    let reply = {
+        let runtime: State<ScanRuntime> = app.state();
+        let mut cancel = runtime.cancel.subscribe();
+        tokio::select! {
+            reply = crate::scan_server::request(
+                app,
+                serde_json::json!({ "op": "scan" }),
+                crate::scan_server::SCAN_TIMEOUT,
+            ) => Some(reply),
+            _ = cancel.changed() => None,
+        }
+    };
+    if !is_current(app, generation) {
+        return None; // paused or superseded: discard
+    }
+    match reply? {
+        Ok(outcome) => {
+            note_look(started.elapsed().as_millis() as u64);
+            crate::bridge::record_spawn("scan-serve", started.elapsed().as_millis(), 0, None);
+            Some(outcome)
+        }
+        Err(_) => run_manual_scan_oneshot(app, generation).await,
+    }
+}
+
+/// The original path: a new process for one look. Kept as the fallback.
+async fn run_manual_scan_oneshot(
     app: &AppHandle,
     generation: u64,
 ) -> Option<serde_json::Value> {
     let root = crate::bridge::data_root().ok()?;
     let (cli, args) = manual_scan_args(app, &root).ok()?;
 
-    // Serialize model loads: no two inference processes at once.
-    let model_state: State<ScanRuntime> = app.state();
-    let _model = model_state.model_lock.lock().await;
+    // No model lock: captures never run the model, so they must not wait
+    // behind summaries being written in the background.
     let started = std::time::Instant::now();
     let child = tokio::process::Command::new(&cli)
         .args(&args)
@@ -840,6 +1149,7 @@ async fn run_manual_scan(
     }
     let parsed =
         serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&output.stdout)).ok();
+    note_look(started.elapsed().as_millis() as u64);
     crate::bridge::record_spawn(
         "manual-scan",
         started.elapsed().as_millis(),
@@ -874,6 +1184,8 @@ async fn scan_loop(app: AppHandle, generation: u64) {
     let mut watching_until: Option<Instant> = None;
     // The last look was a game or a video.
     let mut visual_foreground = false;
+    // When recording last looked for ended activities to summarize.
+    let mut last_processing = Instant::now();
 
     loop {
         if !is_current(&app, generation) {
@@ -949,6 +1261,9 @@ async fn scan_loop(app: AppHandle, generation: u64) {
                         record_marker(&marker_app, "user.away")
                     })
                     .await;
+                    // The user left: a good moment to summarize what ended.
+                    process_ended_soon(&app);
+                    last_processing = Instant::now();
                 }
                 cadence::POLL_INTERVAL_MS
             }
@@ -1009,10 +1324,13 @@ async fn scan_loop(app: AppHandle, generation: u64) {
             }
         };
 
-        // Deliberately no sessionizing here: captures stay model-free while
-        // a scan is active, so inference never contends with capture for
-        // CPU/RAM mid-run. Grouping and summarizing happen once, when the
-        // scan stops (see the finalize block below).
+        // Summarize activities that have ended, in the background, so Stop
+        // only has the last few left. Never while a game or video is in
+        // front: the model would compete with it for the GPU.
+        if !visual_foreground && last_processing.elapsed() >= ENDED_EVERY {
+            process_ended_soon(&app);
+            last_processing = Instant::now();
+        }
 
         // Abortable wait, so a pause is noticed within one poll interval.
         {
@@ -1538,7 +1856,11 @@ pub fn glint_start_scanning(app: AppHandle) -> Result<serde_json::Value, String>
     // first-class timeline rows, not just banner text.
     crate::timeline::eon_started(&app);
     crate::timeline::record_lifecycle(&app, "scan.started");
-    record_marker(&app, "run.started");
+    // On its own thread: the worker request blocks, and this command may run
+    // on the async runtime. It also starts the capture worker ahead of the
+    // first look.
+    let marker_app = app.clone();
+    std::thread::spawn(move || record_marker(&marker_app, "run.started"));
     crate::refresh_tray(&app, true);
 
     Ok(serde_json::json!({
@@ -1609,9 +1931,7 @@ pub async fn glint_capture_once(app: AppHandle) -> Result<serde_json::Value, Str
     }
     let root = crate::bridge::data_root()?;
     let (cli, args) = manual_scan_args(&app, &root)?;
-    // Serialize model loads: no two inference processes at once.
-    let model_state: State<ScanRuntime> = app.state();
-    let _model = model_state.model_lock.lock().await;
+    // No model lock: a capture never runs the model.
     let started = std::time::Instant::now();
     let output = tokio::task::spawn_blocking(move || {
         crate::bridge::hidden_command(&cli).args(&args).output()

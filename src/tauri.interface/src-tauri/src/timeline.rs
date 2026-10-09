@@ -517,11 +517,21 @@ fn probe_decision(app: &AppHandle, hwnd: isize) -> (bool, Option<String>, Option
         return resolve_probe(true, None);
     }
     let result = (|| {
-        let handle = hwnd.to_string();
-        let args = vec!["probe".to_string(), "--handle".to_string(), handle];
-        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let out = crate::bridge::run_sidecar(app, &arg_refs).ok()?;
-        let decision = out.json.get("decision")?;
+        // Through the capture worker (~20 ms); a one-off process (~150 ms)
+        // only if the worker can't answer.
+        let json = crate::scan_server::request_blocking(
+            app,
+            serde_json::json!({ "op": "probe", "handle": hwnd }),
+            crate::scan_server::QUICK_TIMEOUT,
+        )
+        .or_else(|_| {
+            let handle = hwnd.to_string();
+            let args = vec!["probe".to_string(), "--handle".to_string(), handle];
+            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            crate::bridge::run_sidecar(app, &arg_refs).map(|out| out.json)
+        })
+        .ok()?;
+        let decision = json.get("decision")?;
         let allowed = decision.get("allowed").and_then(|v| v.as_bool()).unwrap_or(false);
         let reason = decision
             .get("reason")
@@ -557,6 +567,8 @@ fn handle_switch(app: &AppHandle, hwnd: isize) {
     }
     // Enrich with the Core gate decision (suppressed windows keep process +
     // reason + detail but never their title — mirrors Core semantics).
+    // Watched for closing: closing the app ends its activity right away.
+    crate::system_events::track_foreground(identity.hwnd, &identity.process);
     let (allowed, reason, detail) = probe_decision(app, identity.hwnd);
     let mut row = base_row("window.focused");
     row["process"] = serde_json::Value::String(identity.process);

@@ -13,6 +13,8 @@ mod cadence;
 mod glass;
 mod glint;
 mod runtime;
+mod scan_server;
+mod system_events;
 mod timeline;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -247,15 +249,23 @@ pub fn run() {
     tauri::Builder::default()
         .manage(glint::ScanRuntime::default())
         .manage(glint::AskServer::default())
+        .manage(scan_server::ScanServer::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(shortcut_plugin())
         .setup(|app| {
+            // The user's processor choice for the local AI (GPU by default),
+            // before anything can start the model.
+            glint::apply_ai_backend_env();
             // Developer runs rebuild a stale CLI before anything calls it
             // (only when its C# sources changed; a few seconds when they did).
             #[cfg(debug_assertions)]
             crate::bridge::refresh_dev_cli();
             register_scan_hotkeys(app.handle());
+            // Windows' own end signals: lock, sleep, shutdown, closed apps.
+            system_events::start(app.handle().clone());
+            // A recording a crash or shutdown left open is closed and summarized.
+            glint::recover_on_startup(app.handle());
             // Pin LiteRT python/worker env for every sidecar this process
             // spawns (tray and hotkey actions included).
             let _ = glint::glint_ensure_runtime(app.handle().clone());
@@ -335,6 +345,10 @@ pub fn run() {
             glint::glint_set_zoom,
             glint::glint_admin_status,
             glint::glint_restart_as_admin,
+            glint::glint_ai_backend,
+            glint::glint_set_ai_backend,
+            glint::glint_test_mode,
+            glint::glint_set_test_mode,
             glint::glint_timeline,
             glint::glint_shortcut_status,
             glint::glint_ask,

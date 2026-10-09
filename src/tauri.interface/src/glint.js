@@ -47,6 +47,14 @@ export function formatClock(ms) {
 }
 export const glintSetGlassTint = ({ r, g, b, alpha, blur = true }) =>
   invoke("glint_set_glass_tint", { r, g, b, alpha, blur });
+/** Stutter test mode and look timings: { mode, looks, averageMs, slowestMs }. */
+export const glintTestMode = () => invoke("glint_test_mode");
+/** "normal" | "no-accessibility" | "no-capture" | "titles-only"; for this run only. */
+export const glintSetTestMode = (mode) => invoke("glint_set_test_mode", { mode });
+/** Where the local AI runs: { preferred, lastUsed, gpuFailure }. */
+export const glintAiBackend = () => invoke("glint_ai_backend");
+/** Choose "gpu" or "cpu" for the local AI. */
+export const glintSetAiBackend = (backend) => invoke("glint_set_ai_backend", { backend });
 /** Whether Glint runs as administrator: { elevated }. */
 export const glintAdminStatus = () => invoke("glint_admin_status");
 /** Restart Glint as administrator (Windows asks for consent first). */

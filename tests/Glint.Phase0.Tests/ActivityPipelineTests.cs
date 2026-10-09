@@ -244,6 +244,101 @@ public sealed class ActivityPipelineTests : IDisposable
     }
 
     [Fact]
+    public async Task AnActivityIsSummarizedWhileRecordingOnceItHasEnded()
+    {
+        var coordinator = Coordinator();
+        _inspector.Window = Window("zen", "Re: Venue deposit - Gmail - Zen Browser");
+        _pages.Probe = new PageProbe(true, "mail.google.com", null, null, new object());
+        _pages.Text = "Priya Sharma: Venue deposit\nHi, can you send the receipt for the deposit by Friday? Thanks, Priya";
+        await coordinator.ScanAsync();
+        _now += 180_000;
+        _idle = 100;
+        _frames.Shift++;
+        _pages.Text += "\nYou: Sure, I will send it tonight.";
+        await coordinator.ScanAsync();
+        _now += 60_000;
+        _idle = 60_000;
+        _inspector.Window = Window("osu!", "osu!", fullscreen: true);
+        await coordinator.ScanAsync();
+        var narrator = new FakeNarrator(new Narration(
+            "Replied to Priya about deposit",
+            "Priya Sharma asked for the deposit receipt by Friday. The user said they would send it tonight.",
+            "Send Priya the deposit receipt by Friday"));
+        var builder = new ActivityBuilder(_database, _database, narrator);
+
+        // Two minutes into the game the email could still be resumed: not yet.
+        _now += 120_000;
+        await coordinator.ScanAsync();
+        Assert.Equal(0, await builder.NarrateEndedAsync(_now, 8));
+
+        // Ten minutes in, the email is over: summarized while still recording.
+        _now += 480_000;
+        await coordinator.ScanAsync();
+        Assert.Equal(1, await builder.NarrateEndedAsync(_now, 8));
+        Assert.Equal(0, await builder.NarrateEndedAsync(_now, 8));
+        Assert.Equal(1, narrator.Calls);
+        Assert.Empty(_database.GetRecentActivities());
+
+        // Stopping seals the sitting; the summary is already there.
+        _database.RecordMarker("run.stopped", _now);
+        await new SessionBuilder(_database, new UnusedSummarizer(), summarizeSessions: false)
+            .RunAsync(_now + Sessionizer.QuietTailMilliseconds);
+        var result = await builder.RunAsync();
+
+        Assert.Equal(0, result.Narrated);
+        Assert.Equal(1, narrator.Calls);
+        var email = Assert.Single(_database.GetRecentActivities(), activity => activity.Category == ActivityCategory.Email);
+        Assert.Equal(SummaryCheck.Verified, email.Check);
+        Assert.Equal("Send Priya the deposit receipt by Friday", email.Task);
+    }
+
+    [Fact]
+    public async Task ClosingAnAppEndsItsActivityRightAway()
+    {
+        var coordinator = Coordinator();
+        _inspector.Window = Window("zen", "Re: Venue deposit - Gmail - Zen Browser");
+        _pages.Probe = new PageProbe(true, "mail.google.com", null, null, new object());
+        _pages.Text = "Priya Sharma: Venue deposit\nHi, can you send the receipt for the deposit by Friday? Thanks, Priya";
+        await coordinator.ScanAsync();
+        _now += 120_000;
+        _frames.Shift++;
+        _pages.Text += "\nYou: Sure, I will send it tonight.";
+        await coordinator.ScanAsync();
+        _now += 10_000;
+        _database.RecordMarker("app.closed", _now, "zen");
+        _now += 5_000;
+        _inspector.Window = Window("osu!", "osu!", fullscreen: true);
+        await coordinator.ScanAsync();
+        _now += 30_000;
+
+        var narrator = new FakeNarrator(new Narration(
+            "Replied to Priya about deposit",
+            "Priya Sharma asked for the deposit receipt by Friday.",
+            null));
+        Assert.Equal(1, await new ActivityBuilder(_database, _database, narrator).NarrateEndedAsync(_now, 8));
+    }
+
+    [Fact]
+    public async Task ARecordingLeftOpenByACrashIsClosedAtStartup()
+    {
+        _database.RecordMarker("run.started", _now);
+        _inspector.Window = Window("osu!", "osu!", fullscreen: true);
+        var coordinator = Coordinator();
+        await coordinator.ScanAsync();
+        _now += 30_000;
+        await coordinator.ScanAsync();
+
+        // The PC crashed here; Glint starts again an hour later.
+        var recovery = _database.RecoverUnfinishedRun(_now + 3_600_000);
+
+        Assert.True(recovery.ClosedRun);
+        Assert.Equal(_now, recovery.ClosedAtMilliseconds);
+        Assert.True(recovery.Pending > 0);
+        Assert.Contains(_database.GetMarkers(T0, _now + 1), marker => marker.Kind == "run.stopped");
+        Assert.False(_database.RecoverUnfinishedRun(_now + 3_700_000).ClosedRun);
+    }
+
+    [Fact]
     public async Task AnEpisodeOnAnUnknownSiteIsOneWatchRecord()
     {
         // The case that broke: a full-screen episode on a site no catalog
@@ -670,8 +765,11 @@ public sealed class ActivityPipelineTests : IDisposable
     {
         public string LastText { get; private set; } = string.Empty;
 
+        public int Calls { get; private set; }
+
         public Task<Narration> NarrateAsync(NarrationRequest request, CancellationToken cancellationToken = default)
         {
+            Calls++;
             LastText = request.Text;
             return Task.FromResult(narration);
         }

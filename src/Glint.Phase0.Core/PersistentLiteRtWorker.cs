@@ -23,7 +23,7 @@ public sealed class PersistentLiteRtWorker : ILiteRtGenerator, IDisposable
     private readonly string _pythonExecutable;
     private readonly string _workerScript;
     private readonly string _modelPath;
-    private readonly string _backend;
+    private string _backend;
     private readonly int _maxNumTokens;
     private readonly TimeSpan _idleUnloadAfter;
 
@@ -40,14 +40,14 @@ public sealed class PersistentLiteRtWorker : ILiteRtGenerator, IDisposable
         string pythonExecutable,
         string workerScript,
         string modelPath,
-        string backend = "cpu",
+        string? backend = null,
         int maxNumTokens = LiteRtWorkerProtocol.DefaultMaxNumTokens,
         TimeSpan? idleUnloadAfter = null)
     {
         _pythonExecutable = Path.GetFullPath(pythonExecutable);
         _workerScript = Path.GetFullPath(workerScript);
         _modelPath = Path.GetFullPath(modelPath);
-        _backend = backend;
+        _backend = backend ?? LiteRtBackend.Current;
         _maxNumTokens = maxNumTokens;
         _idleUnloadAfter = idleUnloadAfter ?? TimeSpan.FromMinutes(5);
         if (_idleUnloadAfter > TimeSpan.Zero && _idleUnloadAfter != Timeout.InfiniteTimeSpan)
@@ -191,6 +191,9 @@ public sealed class PersistentLiteRtWorker : ILiteRtGenerator, IDisposable
         }
     }
 
+    /// Where this worker's model is loaded: "gpu" or "cpu".
+    public string Backend => _backend;
+
     private async Task<Process> EnsureWorkerAsync(CancellationToken cancellationToken)
     {
         var existing = _process;
@@ -199,6 +202,22 @@ public sealed class PersistentLiteRtWorker : ILiteRtGenerator, IDisposable
             return existing;
         }
 
+        try
+        {
+            return await StartWorkerAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception error) when (_backend == LiteRtBackend.Gpu && error is not OperationCanceledException)
+        {
+            // No usable GPU (or no driver for it): the CPU always works, only
+            // slower. Remembered so later loads skip the GPU attempt.
+            LiteRtBackend.MarkGpuFailed(error.Message);
+            _backend = LiteRtBackend.Cpu;
+            return await StartWorkerAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<Process> StartWorkerAsync(CancellationToken cancellationToken)
+    {
         KillWorker();
 
         var start = new ProcessStartInfo

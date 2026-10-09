@@ -28,6 +28,7 @@ tools/litert/.venv/
 *.key
 .env
 .env.*
+/video
 
 # ---------------------------------------------------------------
 # Docs: README.md is the only prose file published.

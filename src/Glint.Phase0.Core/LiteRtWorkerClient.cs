@@ -32,20 +32,20 @@ public sealed class LiteRtWorkerClient : ILiteRtGenerator
     private readonly string _pythonExecutable;
     private readonly string _workerScript;
     private readonly string _modelPath;
-    private readonly string _backend;
+    private string _backend;
     private readonly int _maxNumTokens;
 
     public LiteRtWorkerClient(
         string pythonExecutable,
         string workerScript,
         string modelPath,
-        string backend = "cpu",
+        string? backend = null,
         int maxNumTokens = 2048)
     {
         _pythonExecutable = Path.GetFullPath(pythonExecutable);
         _workerScript = Path.GetFullPath(workerScript);
         _modelPath = Path.GetFullPath(modelPath);
-        _backend = backend;
+        _backend = backend ?? LiteRtBackend.Current;
         _maxNumTokens = maxNumTokens;
     }
 
@@ -53,6 +53,26 @@ public sealed class LiteRtWorkerClient : ILiteRtGenerator
         LiteRtGenerationRequest request,
         TimeSpan timeout,
         CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await GenerateOnceAsync(request, timeout, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception error) when (_backend == LiteRtBackend.Gpu
+            && error is InvalidOperationException
+            && !cancellationToken.IsCancellationRequested)
+        {
+            // The GPU could not run the model: answer on the CPU instead.
+            LiteRtBackend.MarkGpuFailed(error.Message);
+            _backend = LiteRtBackend.Cpu;
+            return await GenerateOnceAsync(request, timeout, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<LiteRtGenerationResult> GenerateOnceAsync(
+        LiteRtGenerationRequest request,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
     {
         ValidateFiles();
         LiteRtWorkerProtocol.ValidateRequest(request);

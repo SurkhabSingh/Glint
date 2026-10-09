@@ -275,6 +275,10 @@ public interface IActivityStore
     void TouchScan(string scanId, long lastSeenMilliseconds);
 }
 
+/// What startup recovery found: whether an unfinished recording was closed,
+/// and how much is waiting to be grouped or summarized.
+public sealed record RecoveryResult(bool ClosedRun, long? ClosedAtMilliseconds, long Pending);
+
 public interface IActivityWorkStore
 {
     IReadOnlyList<CaptureRow> GetUnassignedCaptures(int limit = 1_000);
@@ -300,4 +304,9 @@ public interface IActivityWorkStore
     void UpsertSession(ActivitySession session);
 
     ActivitySession? GetSession(string id);
+
+    /// A summary written while recording, kept until its session is sealed.
+    void SaveEarlyNarration(ActivityRecord activity, long nowMilliseconds);
+
+    bool HasEarlyNarration(ActivityRecord activity);
 }

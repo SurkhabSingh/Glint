@@ -379,13 +379,19 @@ public sealed partial class Phase0Database : ICaptureEventStore, IManualScanStor
     /// started or stopped. These are what let the sessionizer tell a real
     /// break from a screen that simply did not change.
     /// </summary>
-    public void RecordMarker(string kind, long timestampMilliseconds)
+    public void RecordMarker(string kind, long timestampMilliseconds, string? detail = null)
     {
+        if (!ActivityMarker.Kinds.Contains(kind))
+        {
+            throw new ArgumentException($"Unknown marker kind: {kind}.", nameof(kind));
+        }
+
         using var command = _connection.CreateCommand();
         command.CommandText =
-            "INSERT INTO activity_markers (ts_ms, kind) VALUES ($ts, $kind);";
+            "INSERT INTO activity_markers (ts_ms, kind, detail) VALUES ($ts, $kind, $detail);";
         command.Parameters.AddWithValue("$ts", timestampMilliseconds);
         command.Parameters.AddWithValue("$kind", kind);
+        command.Parameters.AddWithValue("$detail", (object?)detail?.Trim().ToLowerInvariant() ?? DBNull.Value);
         command.ExecuteNonQuery();
     }
 
@@ -617,7 +623,7 @@ public sealed partial class Phase0Database : ICaptureEventStore, IManualScanStor
         using var command = _connection.CreateCommand();
         command.CommandText =
             """
-            SELECT ts_ms, kind
+            SELECT ts_ms, kind, detail
             FROM activity_markers
             WHERE ts_ms >= $from AND ts_ms <= $to
             ORDER BY ts_ms ASC, id ASC;
@@ -628,7 +634,7 @@ public sealed partial class Phase0Database : ICaptureEventStore, IManualScanStor
         var markers = new List<ActivityMarker>();
         while (reader.Read())
         {
-            markers.Add(new(reader.GetInt64(0), reader.GetString(1)));
+            markers.Add(new(reader.GetInt64(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2)));
         }
 
         return markers;

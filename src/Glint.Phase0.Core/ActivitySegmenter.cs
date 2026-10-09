@@ -102,14 +102,21 @@ public static class ActivitySegmenter
     /// one runs up to it when the gap is short, so stopping a minute into a
     /// look still counts that minute.
     /// </param>
+    /// <param name="closings">
+    /// When an app was closed, by app key (lowercase process name). What was
+    /// going on in it ends there: it runs no later than the close, and opening
+    /// the app again starts something new instead of resuming it.
+    /// </param>
     public static IReadOnlyList<ActivityDraft> Segment(
         IReadOnlyList<ScanFacet> facets,
         Func<ScanFacet, PageIdentity> identify,
-        IReadOnlyList<long>? endings = null)
+        IReadOnlyList<long>? endings = null,
+        IReadOnlyList<(long At, string AppKey)>? closings = null)
     {
         ArgumentNullException.ThrowIfNull(facets);
         ArgumentNullException.ThrowIfNull(identify);
-        var visits = Visits(facets, identify, endings ?? []);
+        closings ??= [];
+        var visits = Visits(facets, identify, endings ?? [], closings);
         if (visits.Count == 0)
         {
             return [];
@@ -154,7 +161,8 @@ public static class ActivitySegmenter
 
             ActivityDraft draft;
             if (latestByKey.TryGetValue(visit.Identity.Key, out var earlier)
-                && visit.Start - earlier.EndedAtMilliseconds <= ResumeWithinMilliseconds)
+                && visit.Start - earlier.EndedAtMilliseconds <= ResumeWithinMilliseconds
+                && !ClosedBetween(closings, visit.Identity.AppKey, earlier.EndedAtMilliseconds, visit.Start))
             {
                 draft = earlier;
                 if (current is not null && !ReferenceEquals(current, earlier))
@@ -200,10 +208,19 @@ public static class ActivitySegmenter
         return drafts;
     }
 
+    private static bool ClosedBetween(
+        IReadOnlyList<(long At, string AppKey)> closings,
+        string appKey,
+        long from,
+        long to) =>
+        closings.Any(close => close.At >= from && close.At <= to
+            && string.Equals(close.AppKey, appKey, StringComparison.OrdinalIgnoreCase));
+
     private static List<Visit> Visits(
         IReadOnlyList<ScanFacet> facets,
         Func<ScanFacet, PageIdentity> identify,
-        IReadOnlyList<long> endings)
+        IReadOnlyList<long> endings,
+        IReadOnlyList<(long At, string AppKey)> closings)
     {
         var ordered = facets
             .OrderBy(facet => facet.CapturedAtMilliseconds)
@@ -249,6 +266,18 @@ public static class ActivitySegmenter
                 {
                     end = ending;
                 }
+            }
+
+            // Closed before the fill-in time ran out: it ended at the close.
+            var closedAt = closings
+                .Where(close => close.At >= lastSeen && close.At < end
+                    && string.Equals(close.AppKey, identity.AppKey, StringComparison.OrdinalIgnoreCase))
+                .Select(close => close.At)
+                .DefaultIfEmpty(long.MaxValue)
+                .Min();
+            if (closedAt != long.MaxValue)
+            {
+                end = closedAt;
             }
 
             visits.Add(new Visit(identity, start, Math.Max(start, end), run, identities));

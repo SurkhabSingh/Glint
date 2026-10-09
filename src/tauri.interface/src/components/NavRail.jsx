@@ -37,21 +37,6 @@ const ICONS = {
       <path d="M10.5 10.5L14.5 14.5" strokeLinecap="round" />
     </svg>
   ),
-  diagnostics: (
-    <svg
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-    >
-      <rect x="2" y="2" width="12" height="12" rx="2" />
-      <path
-        d="M5.5 8.2l1.8 1.8 3.2-3.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  ),
   timeline: (
     <svg
       viewBox="0 0 16 16"
@@ -113,13 +98,12 @@ function RailButton({ id, label, page, onNavigate }) {
   );
 }
 
-/** Ports NavigationView PaneDisplayMode=LeftCompact (Dashboard/Activity/Search/...). */
+/** Ports NavigationView PaneDisplayMode=LeftCompact (Dashboard/Activity/Search/...; Diagnostics lives in Settings). */
 function NavRail({ page, onNavigate }) {
   const items = [
     { id: "dashboard", label: "Dashboard" },
     { id: "activity", label: "Activity" },
     { id: "search", label: "Search" },
-    { id: "diagnostics", label: "Diag." },
     { id: "timeline", label: "Timeline" },
     { id: "agent", label: "Agent" },
   ];

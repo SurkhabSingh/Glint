@@ -64,6 +64,39 @@ public sealed class UiAutomationService : IUiAutomationService, IPageReader
     private const int ProbeMaxNodes = 1_500;
     private const int ProbeMaxDepth = 14;
     private const int FocusedInputCharacters = 600;
+
+    /// <summary>
+    /// A text-pattern call slower than this blocked the app. Some apps
+    /// (Chromium/Electron ones such as Discord) answer "the text of the
+    /// visible page" on their UI thread: measured at 570-940 ms per call, a
+    /// freeze the user feels as a stuck scroll or drag. Others (Firefox,
+    /// Zen) answer in tens of milliseconds without blocking.
+    /// </summary>
+    internal const long SlowTextPatternMilliseconds = 150;
+
+    /// <summary>
+    /// Apps whose text-pattern calls turned out slow, by process name. They
+    /// are read element by element from then on (names and values), which
+    /// measured no freeze in the same apps. Learned by timing, so no app
+    /// list is needed; kept for the life of the capture worker.
+    /// </summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> SlowTextPatternApps =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// Whether this app's text-pattern calls are known to block it.
+    internal static bool TextPatternIsSlow(string processName) =>
+        SlowTextPatternApps.ContainsKey(processName);
+
+    private static void TimeTextPattern(string processName, Stopwatch timer)
+    {
+        if (timer.ElapsedMilliseconds > SlowTextPatternMilliseconds)
+        {
+            SlowTextPatternApps[processName] = timer.ElapsedMilliseconds;
+        }
+    }
+
+    /// For tests.
+    internal static void ForgetSlowTextPatternApps() => SlowTextPatternApps.Clear();
     private static readonly TimeSpan ProbeBudget = TimeSpan.FromMilliseconds(700);
 
     /// Controls whose insides never hold the page or the address bar. Not
@@ -165,6 +198,11 @@ public sealed class UiAutomationService : IUiAutomationService, IPageReader
     {
         var timer = Stopwatch.StartNew();
         var profile = TextExtractionProfile.For(window);
+        var slowTextPattern = TextPatternIsSlow(window.ProcessName);
+        if (slowTextPattern)
+        {
+            profile = profile with { TextPatternCharacters = 0 };
+        }
         var lines = new List<string>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var nodesVisited = 0;
@@ -369,6 +407,11 @@ public sealed class UiAutomationService : IUiAutomationService, IPageReader
 
         var timer = Stopwatch.StartNew();
         var profile = TextExtractionProfile.For(window);
+        var slowTextPattern = TextPatternIsSlow(window.ProcessName);
+        if (slowTextPattern)
+        {
+            profile = profile with { TextPatternCharacters = 0 };
+        }
         var lines = new List<string>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var nodesVisited = 0;
@@ -380,9 +423,11 @@ public sealed class UiAutomationService : IUiAutomationService, IPageReader
             // What is on screen first: the visible part of the page is what
             // the user actually saw, and it is far smaller than the whole
             // document.
-            if (document.TryGetCurrentPattern(TextPattern.Pattern, out var pattern)
+            if (!slowTextPattern
+                && document.TryGetCurrentPattern(TextPattern.Pattern, out var pattern)
                 && pattern is TextPattern text)
             {
+                var call = Stopwatch.StartNew();
                 foreach (var range in text.GetVisibleRanges())
                 {
                     foreach (var line in range.GetText(profile.TextPatternCharacters)
@@ -396,6 +441,8 @@ public sealed class UiAutomationService : IUiAutomationService, IPageReader
                         }
                     }
                 }
+
+                TimeTextPattern(window.ProcessName, call);
             }
 
             if (characters < 200)
@@ -549,7 +596,9 @@ public sealed class UiAutomationService : IUiAutomationService, IPageReader
         // Browser/web views usually expose the page body through TextPattern on a
         // document element. Read that before Name/Value so page content outranks
         // toolbar chrome and address-bar fragments.
-        if (element.TryGetCurrentPattern(TextPattern.Pattern, out var textPattern)
+        // Skipped (0) for apps where text-pattern calls block the app.
+        if (textPatternCharacters > 0
+            && element.TryGetCurrentPattern(TextPattern.Pattern, out var textPattern)
             && textPattern is TextPattern text)
         {
             var document = text.DocumentRange.GetText(textPatternCharacters);

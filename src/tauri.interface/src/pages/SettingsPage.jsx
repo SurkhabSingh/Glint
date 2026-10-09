@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { glintAdminStatus, glintRestartAsAdmin } from "../glint";
+import DiagnosticsSection from "../components/DiagnosticsSection";
+import { glintAdminStatus, glintAiBackend, glintRestartAsAdmin, glintSetAiBackend } from "../glint";
 import { ACCENTS, DEFAULT_APPEARANCE, THEMES, ZOOM_STEPS, stepZoom, themeById } from "../themes";
 
 function Toggle({ checked, onToggle, label, disabled = false }) {
@@ -208,9 +209,77 @@ function AdminCard() {
   );
 }
 
+/**
+ * Where the local AI runs. The GPU is several times faster; the CPU always
+ * works. If the GPU can't load the model, Glint falls back to the CPU and
+ * says so here.
+ */
+function AiProcessorCard() {
+  const [status, setStatus] = useState(null);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    glintAiBackend()
+      .then(setStatus)
+      .catch(() => setStatus(null));
+  }, []);
+
+  async function choose(backend) {
+    setMessage("");
+    try {
+      setStatus(await glintSetAiBackend(backend));
+    } catch (error) {
+      setMessage(String(error?.message ?? error));
+    }
+  }
+
+  const preferred = status?.preferred ?? "gpu";
+  const fellBack = preferred === "gpu" && status?.lastUsed === "cpu";
+  const used = status?.lastUsed
+    ? `Last summaries ran on the ${status.lastUsed.toUpperCase()}.`
+    : "Not used yet since Glint started.";
+
+  return (
+    <div className="glint-card">
+      <h3>AI processor</h3>
+      <div className="setting-row">
+        <div>
+          <div className="setting-name">Run the local AI on</div>
+          <div className="setting-desc">
+            The graphics card is about 3× faster for summaries. The processor works on any PC but is slower and busier while summarizing. {used}
+          </div>
+          {fellBack && (
+            <div className="setting-desc admin-error">
+              The graphics card couldn't load the model, so Glint used the processor instead{status?.gpuFailure ? ` (${status.gpuFailure})` : ""}.
+            </div>
+          )}
+          {message && <div className="setting-desc admin-error">{message}</div>}
+        </div>
+        <div className="dash-seg" role="radiogroup" aria-label="AI processor">
+          {[
+            { id: "gpu", label: "Graphics card" },
+            { id: "cpu", label: "Processor" },
+          ].map((option) => (
+            <button
+              key={option.id}
+              role="radio"
+              aria-checked={preferred === option.id}
+              className={preferred === option.id ? "active" : ""}
+              onClick={() => choose(option.id)}
+              disabled={status === null}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const percent = (value) => `${Math.round(value * 100)}%`;
 
-function SettingsPage({ appearance, onAppearanceChange }) {
+function SettingsPage({ appearance, onAppearanceChange, diagnostics }) {
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [scanNotifications, setScanNotifications] = useState(true);
   const theme = themeById(appearance.theme);
@@ -387,6 +456,8 @@ function SettingsPage({ appearance, onAppearanceChange }) {
           </div>
         </div>
 
+        <AiProcessorCard />
+
         <AdminCard />
 
         <div className="glint-card">
@@ -407,6 +478,8 @@ function SettingsPage({ appearance, onAppearanceChange }) {
             <Toggle checked={scanNotifications} onToggle={setScanNotifications} label="Scan notifications" />
           </div>
         </div>
+
+        {diagnostics && <DiagnosticsSection {...diagnostics} />}
       </div>
     </div>
   );

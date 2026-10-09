@@ -36,9 +36,12 @@ try
         {
             await DelayAsync(options);
             var window = ResolveWindow(options);
+            IUiAutomationService prober = StutterTestMode.AccessibilityOff
+                ? new InertAutomation()
+                : new UiAutomationService();
             var automation = window is null
                 ? null
-                : new UiAutomationService().ProbeSecurity(window);
+                : prober.ProbeSecurity(window);
             var decision = window is null
                 ? PrivacyDecision.Suppress(
                     SuppressReason.NoForegroundWindow,
@@ -304,14 +307,19 @@ try
             // The activity model: identity first, then what this kind of app
             // needs. Text only for reading work, compared line by line with
             // what the same page already stored.
-            var automation = new UiAutomationService();
+            // A stutter test can turn either suspect off for one run.
+            IUiAutomationService automation = StutterTestMode.AccessibilityOff
+                ? new InertAutomation()
+                : new UiAutomationService();
+            IFrameCaptureService frames = StutterTestMode.CaptureOff
+                ? new DisabledFrameCapture()
+                : new WindowsGraphicsCaptureService(options.ContainsKey("software-device"));
             var coordinator = new ActivityScanCoordinator(
                 new ForegroundWindowInspector(HostProcessId(options)),
                 automation,
-                automation,
+                (IPageReader)automation,
                 new PrivacyGate(),
-                new WindowsGraphicsCaptureService(
-                    options.ContainsKey("software-device")),
+                frames,
                 new DeterministicRedactor(),
                 database);
             WriteJson(await coordinator.ScanAsync(), json);
@@ -346,6 +354,151 @@ try
                     probe.Site,
                     probe.DocumentBounds,
                     trace
+                },
+                json);
+            break;
+        }
+
+        // Diagnostics: which part of a look blocks another app. Runs one part
+        // (accessibility, screen grab, OCR, or nothing) against a window by
+        // process name, repeatedly, while pinging that window's UI thread
+        // every 10 ms. A blocked UI thread is what makes scrolling and
+        // dragging stutter, so the ping delays say which part is to blame.
+        case "stutter-probe":
+        {
+            var processName = RequireOption(options, "process");
+            var part = options.GetValueOrDefault("part", "idle");
+            var repeat = int.TryParse(options.GetValueOrDefault("repeat"), out var parsedRepeat) ? Math.Clamp(parsedRepeat, 1, 50) : 5;
+            var handle = System.Diagnostics.Process.GetProcessesByName(processName)
+                .Select(process => process.MainWindowHandle)
+                .FirstOrDefault(value => value != 0);
+            var target = handle == 0 ? null : new ForegroundWindowInspector().Inspect(handle);
+            if (target is null)
+            {
+                throw new InvalidOperationException($"No window for {processName}.");
+            }
+
+            using var ping = StutterProbe.StartPinging(handle);
+            var automation = new UiAutomationService();
+            var frames = new WindowsGraphicsCaptureService();
+            var partTimes = new List<double>();
+            var characters = 0;
+            for (var run = 0; run < repeat; run++)
+            {
+                var timer = System.Diagnostics.Stopwatch.StartNew();
+                switch (part)
+                {
+                    case "accessibility":
+                    {
+                        var probe = automation.ProbePage(target);
+                        // The page's text when the probe found one, else the window's.
+                        var text = automation.ExtractPageText(target, probe);
+                        characters = text.Text.Length;
+                        break;
+                    }
+
+                    case "find-page":
+                        automation.ProbePage(target);
+                        break;
+
+                    case "read-text":
+                        characters = automation.ExtractText(target).Text.Length;
+                        break;
+
+                    case "visible-text":
+                    {
+                        // Only the first suspect: the visible ranges of the page document.
+                        var probe = automation.ProbePage(target);
+                        var document = typeof(PageProbe)
+                            .GetProperty("Document", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?
+                            .GetValue(probe) as System.Windows.Automation.AutomationElement;
+                        if (document is not null
+                            && document.TryGetCurrentPattern(System.Windows.Automation.TextPattern.Pattern, out var pattern)
+                            && pattern is System.Windows.Automation.TextPattern text)
+                        {
+                            foreach (var range in text.GetVisibleRanges())
+                            {
+                                characters += range.GetText(64_000).Length;
+                            }
+                        }
+                        else
+                        {
+                            characters = -1; // no document with a text pattern
+                        }
+
+                        break;
+                    }
+
+                    case "names-batched":
+                    {
+                        // Every element's name and value in one cached request,
+                        // visible ones only, no text pattern.
+                        var root = System.Windows.Automation.AutomationElement.FromHandle(handle);
+                        var cache = new System.Windows.Automation.CacheRequest { TreeScope = System.Windows.Automation.TreeScope.Element };
+                        cache.Add(System.Windows.Automation.AutomationElement.NameProperty);
+                        cache.Add(System.Windows.Automation.AutomationElement.IsOffscreenProperty);
+                        cache.Add(System.Windows.Automation.AutomationElement.IsPasswordProperty);
+                        using (cache.Activate())
+                        {
+                            var all = root.FindAll(System.Windows.Automation.TreeScope.Descendants, System.Windows.Automation.Condition.TrueCondition);
+                            foreach (System.Windows.Automation.AutomationElement element in all)
+                            {
+                                if (element.Cached.IsOffscreen || element.Cached.IsPassword)
+                                {
+                                    continue;
+                                }
+
+                                characters += element.Cached.Name?.Length ?? 0;
+                            }
+                        }
+
+                        break;
+                    }
+
+                    case "focus-check":
+                        automation.ProbeSecurity(target);
+                        break;
+
+                    case "capture":
+                    {
+                        using var frame = await frames.CaptureFrameAsync(target);
+                        break;
+                    }
+
+                    case "ocr":
+                    {
+                        using var frame = await frames.CaptureFrameAsync(target);
+                        var ocr = await frame.RecognizeAsync(null);
+                        characters = ocr.Text.Length;
+                        break;
+                    }
+
+                    default:
+                        await Task.Delay(500);
+                        break;
+                }
+
+                partTimes.Add(timer.Elapsed.TotalMilliseconds);
+                await Task.Delay(300);
+            }
+
+            var pings = ping.Stop();
+            pings.Sort();
+            double At(double q) => pings.Count == 0 ? 0 : pings[Math.Min(pings.Count - 1, (int)(q * pings.Count))];
+            WriteJson(
+                new
+                {
+                    process = processName,
+                    part,
+                    repeat,
+                    partMedianMs = Math.Round(partTimes.OrderBy(x => x).ElementAt(partTimes.Count / 2)),
+                    characters,
+                    pings = pings.Count,
+                    pingMedianMs = Math.Round(At(0.5), 1),
+                    pingP99Ms = Math.Round(At(0.99), 1),
+                    pingMaxMs = Math.Round(pings.Count == 0 ? 0 : pings[^1], 1),
+                    pingsOver16Ms = pings.Count(x => x > 16),
+                    pingsOver50Ms = pings.Count(x => x > 50)
                 },
                 json);
             break;
@@ -441,6 +594,113 @@ try
             break;
         }
 
+        // The capture worker: one process for the whole time Glint runs, with
+        // the encrypted database opened once. Every look, every window-switch
+        // privacy check and every marker is a request on stdin (one JSON line)
+        // answered on stdout (one JSON line, echoing the request id), so
+        // nothing starts a process or unlocks the database per look.
+        // Requests: {"id":1,"op":"scan"|"probe"|"mark"|"ping",
+        //            "testMode":"normal", "handle":123, "kind":"...", "at":ms, "detail":"..."}
+        case "scan-serve":
+        {
+            var line = new JsonSerializerOptions(json) { WriteIndented = false };
+            using var input = new StreamReader(Console.OpenStandardInput(), new System.Text.UTF8Encoding(false));
+            using var output = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
+            using var database = OpenDatabase(dataRoot, options);
+            var hostProcessId = HostProcessId(options);
+            var inspector = new ForegroundWindowInspector(hostProcessId);
+            var realAutomation = new UiAutomationService();
+            var inertAutomation = new InertAutomation();
+            var realFrames = new WindowsGraphicsCaptureService(options.ContainsKey("software-device"));
+            var noFrames = new DisabledFrameCapture();
+            var gate = new PrivacyGate();
+            var redactor = new DeterministicRedactor();
+            while (true)
+            {
+                var requestLine = await input.ReadLineAsync();
+                if (requestLine is null)
+                {
+                    break; // the host closed the pipe (Glint exited)
+                }
+
+                if (string.IsNullOrWhiteSpace(requestLine))
+                {
+                    continue;
+                }
+
+                long id = 0;
+                try
+                {
+                    using var request = JsonDocument.Parse(requestLine);
+                    var root = request.RootElement;
+                    id = root.TryGetProperty("id", out var idValue) ? idValue.GetInt64() : 0;
+                    var op = root.TryGetProperty("op", out var opValue) ? opValue.GetString() : null;
+                    var testMode = root.TryGetProperty("testMode", out var modeValue) ? modeValue.GetString() : null;
+                    Environment.SetEnvironmentVariable(
+                        StutterTestMode.EnvironmentVariable,
+                        string.IsNullOrWhiteSpace(testMode) || testMode == "normal" ? null : testMode);
+                    IUiAutomationService automation = StutterTestMode.AccessibilityOff ? inertAutomation : realAutomation;
+                    object result;
+                    switch (op)
+                    {
+                        case "scan":
+                        {
+                            var coordinator = new ActivityScanCoordinator(
+                                inspector,
+                                automation,
+                                (IPageReader)automation,
+                                gate,
+                                StutterTestMode.CaptureOff ? noFrames : realFrames,
+                                redactor,
+                                database);
+                            result = await coordinator.ScanAsync();
+                            break;
+                        }
+
+                        case "probe":
+                        {
+                            var handle = root.TryGetProperty("handle", out var handleValue) ? handleValue.GetInt64() : 0;
+                            var window = handle == 0 ? inspector.Inspect() : inspector.Inspect(new nint(handle));
+                            var security = window is null ? null : automation.ProbeSecurity(window);
+                            var decision = window is null
+                                ? PrivacyDecision.Suppress(SuppressReason.NoForegroundWindow, "Windows did not report a foreground window")
+                                : gate.Evaluate(window, security ?? new(false, false, false, "UI Automation unavailable"));
+                            result = new { window, automation = security, decision };
+                            break;
+                        }
+
+                        case "mark":
+                        {
+                            var kind = root.GetProperty("kind").GetString()
+                                ?? throw new InvalidDataException("A mark needs a kind.");
+                            var at = root.TryGetProperty("at", out var atValue) && atValue.ValueKind == JsonValueKind.Number
+                                ? atValue.GetInt64()
+                                : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                            var detail = root.TryGetProperty("detail", out var detailValue) ? detailValue.GetString() : null;
+                            database.RecordMarker(kind, at, detail);
+                            result = new { kind, atMilliseconds = at, detail };
+                            break;
+                        }
+
+                        case "ping":
+                            result = new { ok = true, processId = Environment.ProcessId };
+                            break;
+
+                        default:
+                            throw new InvalidDataException($"Unknown request: {op}.");
+                    }
+
+                    await output.WriteLineAsync(JsonSerializer.Serialize(new { id, result }, line));
+                }
+                catch (Exception error)
+                {
+                    await output.WriteLineAsync(JsonSerializer.Serialize(new { id, error = $"{error.GetType().Name}: {error.Message}" }, line));
+                }
+            }
+
+            break;
+        }
+
         // Diagnostics: recording and presence markers in a time range.
         case "markers":
         {
@@ -496,7 +756,7 @@ try
                 RequireOption(options, "python"),
                 RequireOption(options, "worker"),
                 RequireOption(options, "model"),
-                options.GetValueOrDefault("backend", "cpu"),
+                options.GetValueOrDefault("backend", LiteRtBackend.Current),
                 int.TryParse(options.GetValueOrDefault("max-tokens"), out var maxTokens)
                     ? maxTokens
                     : 2048);
@@ -553,8 +813,19 @@ try
             var at = long.TryParse(options.GetValueOrDefault("at"), out var parsedAt)
                 ? parsedAt
                 : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            database.RecordMarker(kind, at);
-            WriteJson(new { kind, atMilliseconds = at }, json);
+            var detail = options.GetValueOrDefault("detail");
+            database.RecordMarker(kind, at, detail);
+            WriteJson(new { kind, atMilliseconds = at, detail }, json);
+            break;
+        }
+
+        // At startup: close a recording a crash or shutdown left open, and
+        // report whether anything is waiting to be grouped or summarized.
+        case "recover":
+        {
+            using var database = OpenDatabase(dataRoot, options);
+            var recovery = database.RecoverUnfinishedRun(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            WriteJson(recovery, json);
             break;
         }
 
@@ -594,6 +865,8 @@ try
                 : 8;
             var startsBefore = LiteRtWorkerMetrics.StartCount;
             ActivityBuildResult activities;
+            var earlyNarrated = 0;
+            string? backendUsed = null;
             if (resolution.IsReady && maxNarrations > 0)
             {
                 // One worker for every summary in this run, so the model loads
@@ -604,12 +877,22 @@ try
                     resolution.ModelPath!,
                     maxNumTokens: 4096,
                     idleUnloadAfter: Timeout.InfiniteTimeSpan);
-                activities = await new ActivityBuilder(
-                        database,
-                        database,
-                        new LiteRtActivityNarrator(worker),
-                        maxNarrations)
-                    .RunAsync();
+                var builder = new ActivityBuilder(
+                    database,
+                    database,
+                    new LiteRtActivityNarrator(worker),
+                    maxNarrations);
+                activities = await builder.RunAsync();
+                // While recording: also summarize activities of the sitting in
+                // progress that have already ended (closed, or moved on from).
+                if (options.ContainsKey("ended"))
+                {
+                    earlyNarrated = await builder.NarrateEndedAsync(
+                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        Math.Max(0, maxNarrations - activities.Narrated));
+                }
+
+                backendUsed = LiteRtWorkerMetrics.StartCount > startsBefore ? worker.Backend : null;
             }
             else
             {
@@ -623,6 +906,7 @@ try
                     // Hosts loop while this is above zero: progress means an
                     // activity was described in this run.
                     summarized = activities.Narrated,
+                    earlyNarrated,
                     failed = activities.NarrationFailed,
                     sealedResult.Decided,
                     sealedResult.Threaded,
@@ -632,7 +916,10 @@ try
                     partial = activities.Partial,
                     fallback = activities.Fallback,
                     runtimeReady = resolution.IsReady,
-                    workerStarts = LiteRtWorkerMetrics.StartCount - startsBefore
+                    workerStarts = LiteRtWorkerMetrics.StartCount - startsBefore,
+                    // Which processor the model ran on, and why not the GPU if it fell back.
+                    aiBackend = backendUsed,
+                    gpuFailure = LiteRtBackend.GpuFailure
                 },
                 json);
             break;
@@ -773,7 +1060,7 @@ try
                 resolution.PythonExecutable!,
                 resolution.WorkerScript!,
                 resolution.ModelPath!,
-                options.GetValueOrDefault("backend", "cpu"),
+                options.GetValueOrDefault("backend", LiteRtBackend.Current),
                 int.TryParse(options.GetValueOrDefault("max-tokens"), out var benchTokens)
                     ? benchTokens
                     : 4096);
@@ -914,9 +1201,10 @@ try
                   model-probe --runtime PATH --model PATH
                   model-generate --python PATH --worker PATH --model PATH --prompt TEXT [--backend cpu] [--temperature 0] [--seed 1]
                   session-outcome --id ID --outcome open|settled|unknown [--data-dir PATH]
-                  mark --kind run.started|run.stopped|user.away|user.returned [--at MS]
+                  mark --kind run.started|run.stopped|user.away|user.returned|user.locked|user.unlocked|system.sleep|system.resumed|system.shutdown|app.closed [--at MS] [--detail APP]
+                  recover [--data-dir PATH]
                   sessions [--limit 50] [--data-dir PATH] [--sqlite-vec PATH]
-                  sessionize [--max-summaries 8] [--seal-open] [--data-dir PATH] [--sqlite-vec PATH]
+                  sessionize [--max-summaries 8] [--seal-open] [--ended] [--data-dir PATH] [--sqlite-vec PATH]
                   activities [--limit 200] [--data-dir PATH]
                   usage --from MS --to MS [--data-dir PATH]
                   activity-task --id ID --status Open|LooksDone|Done|None [--data-dir PATH]
@@ -924,6 +1212,7 @@ try
                   app-profiles [--data-dir PATH]
                   ask --question TEXT [--scope day|week|all] [--day YYYY-MM-DD] [--no-model]
                   ask-serve [--data-dir PATH]   (JSON lines on stdin/stdout)
+                  scan-serve [--data-dir PATH] [--host-pid PID]   (capture worker: JSON lines on stdin/stdout)
                   worker-bench [--runs 3] [--prompt TEXT] [--max-tokens 4096] [--data-dir PATH]
                   activity-summarize --text TEXT [--process NAME] [--title TITLE]
                   model-install --manifest PATH [--data-dir PATH]
@@ -1075,4 +1364,60 @@ sealed class NoSessionSummaries : IActivitySummarizer
         string redactedText,
         CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Sessions are described per activity.");
+}
+
+/// Pings a window's UI thread (WM_NULL through SendMessageTimeout) every
+/// 10 ms on a background thread and records how long each answer took.
+sealed class StutterProbe : IDisposable
+{
+    private readonly nint _window;
+    private readonly List<double> _delays = [];
+    private readonly Thread _thread;
+    private volatile bool _stop;
+
+    private StutterProbe(nint window)
+    {
+        _window = window;
+        _thread = new Thread(Run) { IsBackground = true, Name = "stutter-probe" };
+    }
+
+    public static StutterProbe StartPinging(nint window)
+    {
+        var probe = new StutterProbe(window);
+        probe._thread.Start();
+        return probe;
+    }
+
+    public List<double> Stop()
+    {
+        _stop = true;
+        _thread.Join();
+        lock (_delays)
+        {
+            return [.. _delays];
+        }
+    }
+
+    public void Dispose()
+    {
+        _stop = true;
+    }
+
+    private void Run()
+    {
+        while (!_stop)
+        {
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            _ = SendMessageTimeoutW(_window, 0, 0, 0, 0x0002, 2_000, out _);
+            lock (_delays)
+            {
+                _delays.Add(timer.Elapsed.TotalMilliseconds);
+            }
+
+            Thread.Sleep(10);
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern nint SendMessageTimeoutW(nint window, uint message, nint wParam, nint lParam, uint flags, uint timeout, out nint result);
 }

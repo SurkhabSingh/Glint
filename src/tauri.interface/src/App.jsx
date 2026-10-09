@@ -14,7 +14,6 @@ import CommandBar from "./components/CommandBar";
 import ActivityPage from "./pages/ActivityPage";
 import DashboardPage from "./pages/DashboardPage";
 import SearchPage from "./pages/SearchPage";
-import DiagnosticsPage from "./pages/DiagnosticsPage";
 import SettingsPage from "./pages/SettingsPage";
 import TimelinePage from "./pages/TimelinePage";
 import AgentPage from "./pages/AgentPage";
@@ -618,20 +617,21 @@ function App() {
         )}
         {page === "dashboard" && <DashboardPage />}
         {page === "settings" && (
-          <SettingsPage appearance={appearance} onAppearanceChange={setAppearance} />
+          <SettingsPage
+            appearance={appearance}
+            onAppearanceChange={setAppearance}
+            diagnostics={{
+              foregroundSummary,
+              storageSummary,
+              compatibilitySummary,
+              onProbe: handleProbe,
+              onVerifyStorage: handleVerifyStorage,
+              onCompatibility: handleCompatibility,
+            }}
+          />
         )}
         {page === "timeline" && <TimelinePage />}
         {page === "agent" && <AgentPage />}
-        {page === "diagnostics" && (
-          <DiagnosticsPage
-            foregroundSummary={foregroundSummary}
-            storageSummary={storageSummary}
-            compatibilitySummary={compatibilitySummary}
-            onProbe={handleProbe}
-            onVerifyStorage={handleVerifyStorage}
-            onCompatibility={handleCompatibility}
-          />
-        )}
       </div>
     </div>
   );

@@ -715,3 +715,16 @@
 .admin-error {
   color: var(--bad);
 }
+
+/* Settings: Diagnostics section at the bottom of the page */
+.settings-diagnostics {
+  margin-top: 36px;
+  padding-top: 24px;
+  border-top: 1px solid rgb(var(--fg-rgb) / 0.1);
+}
+
+.settings-section-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}

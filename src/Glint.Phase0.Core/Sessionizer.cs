@@ -15,13 +15,29 @@ public sealed record CaptureRow(
     public long EndMilliseconds => Math.Max(CapturedAtMilliseconds, LastSeenMilliseconds ?? CapturedAtMilliseconds);
 }
 
-/// Evidence that the user stepped away or that recording stopped. Kinds are
-/// `user.away`, `user.returned`, `run.started` and `run.stopped`.
-public sealed record ActivityMarker(long TimestampMilliseconds, string Kind)
+/// <summary>
+/// Evidence of a boundary. Kinds: `user.away`, `user.returned`,
+/// `user.locked`, `user.unlocked`, `system.sleep`, `system.resumed`,
+/// `system.shutdown`, `run.started`, `run.stopped`, and `app.closed`, whose
+/// <see cref="Detail"/> names the app (its lowercase process name).
+/// </summary>
+public sealed record ActivityMarker(long TimestampMilliseconds, string Kind, string? Detail = null)
 {
-    /// Marks that end a stretch of work, as opposed to resuming one.
+    /// Kinds the database accepts.
+    public static readonly IReadOnlySet<string> Kinds = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "run.started", "run.stopped", "user.away", "user.returned",
+        "user.locked", "user.unlocked", "system.sleep", "system.resumed",
+        "system.shutdown", "app.closed"
+    };
+
+    /// Marks that end a stretch of work, as opposed to resuming one: the user
+    /// left, locked the PC, it slept or shut down, or recording stopped.
     public bool EndsAStretch =>
-        Kind is "user.away" or "run.stopped";
+        Kind is "user.away" or "run.stopped" or "user.locked" or "system.sleep" or "system.shutdown";
+
+    /// An app was closed: whatever was going on in it is over.
+    public bool ClosesApp => Kind == "app.closed" && !string.IsNullOrWhiteSpace(Detail);
 }
 
 /// A group of captures that belongs together, before it is written.
@@ -41,9 +57,13 @@ public sealed record SessionDraft(
 /// character tail against the new capture's full text, which meant long pages
 /// almost never looked similar enough to continue.
 ///
-/// Boundaries here are time only:
-///   - a gap longer than <see cref="IdleGapMilliseconds"/>
-///   - a session running longer than <see cref="MaxSessionMilliseconds"/>
+/// A session is one sitting at the computer, however long it runs: a
+/// three-hour game is one session. It ends only when something ends the
+/// sitting:
+///   - the user left, locked the PC, it slept or shut down, or recording
+///     stopped, followed by a gap of at least <see cref="IdleGapMilliseconds"/>
+///   - a gap longer than <see cref="UnexplainedGapMilliseconds"/> with no
+///     explanation, the fallback for a crash or history without markers
 ///
 /// Neither the window title nor the app is a boundary, so replying in Outlook
 /// and then finishing in Gmail stays one session, which is how people
@@ -77,12 +97,11 @@ public static class Sessionizer
     /// </remarks>
     public const long UnexplainedGapMilliseconds = 1_800_000;
 
-    /// Hard cap so one long stretch does not become an unsummarizable blob.
-    public const long MaxSessionMilliseconds = 2_700_000;
-
     /// The newest group is only sealed once nothing has been captured for
-    /// this long; otherwise it is probably still growing.
-    public const long QuietTailMilliseconds = 120_000;
+    /// this long; otherwise it is probably still growing. Longer than the
+    /// window in which a look still extends the previous record, so a record
+    /// is never sealed and then extended.
+    public const long QuietTailMilliseconds = 200_000;
 
     /// <summary>
     /// Groups captures into sealable sessions. Input need not be sorted.
@@ -132,11 +151,6 @@ public static class Sessionizer
 
         groups.Add(current);
 
-        // Apply the length cap only after the natural boundaries are known, so
-        // an over-long stretch is cut at its widest internal pause instead of
-        // wherever the 45-minute mark happens to fall.
-        groups = groups.SelectMany(SplitToCap).ToList();
-
         // The last group is the only one that can still be growing: every
         // earlier group is already followed by a boundary.
         var last = groups[^1];
@@ -146,48 +160,6 @@ public static class Sessionizer
         }
 
         return groups.Select(ToDraft).ToList();
-    }
-
-    /// <summary>
-    /// Cuts a stretch that outran the cap, recursively, at its widest internal
-    /// pause. Splitting at the cap itself would put the boundary in the middle
-    /// of whatever the user happened to be doing 45 minutes in.
-    /// </summary>
-    private static IEnumerable<List<CaptureRow>> SplitToCap(List<CaptureRow> group)
-    {
-        var span = group.Max(row => row.EndMilliseconds) - group[0].CapturedAtMilliseconds;
-        if (span <= MaxSessionMilliseconds || group.Count < 2)
-        {
-            yield return group;
-            yield break;
-        }
-
-        var middle = group.Count / 2;
-        var splitIndex = 1;
-        var widest = long.MinValue;
-        for (var index = 1; index < group.Count; index++)
-        {
-            var gap = group[index].CapturedAtMilliseconds
-                - group[index - 1].EndMilliseconds;
-            // Ties favour the middle, so an evenly paced stretch halves rather
-            // than shedding one capture at a time.
-            var closerToMiddle = Math.Abs(index - middle) < Math.Abs(splitIndex - middle);
-            if (gap > widest || (gap == widest && closerToMiddle))
-            {
-                widest = gap;
-                splitIndex = index;
-            }
-        }
-
-        foreach (var part in SplitToCap(group[..splitIndex]))
-        {
-            yield return part;
-        }
-
-        foreach (var part in SplitToCap(group[splitIndex..]))
-        {
-            yield return part;
-        }
     }
 
     private static SessionDraft ToDraft(List<CaptureRow> group) =>

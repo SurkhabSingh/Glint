@@ -159,7 +159,15 @@ public sealed class ActivityBuilder
                 .Where(marker => marker.EndsAStretch)
                 .Select(marker => marker.TimestampMilliseconds)
                 .ToList();
-        var drafts = ActivitySegmenter.Segment(facets, facet => Identify(facet, constantsByProcess), endings);
+        var closings = facets.Count == 0
+            ? []
+            : _store.GetMarkers(
+                    facets.Min(facet => facet.CapturedAtMilliseconds),
+                    facets.Max(facet => facet.LastSeenMilliseconds) + ActivitySegmenter.ResumeWithinMilliseconds)
+                .Where(marker => marker.ClosesApp)
+                .Select(marker => (marker.TimestampMilliseconds, marker.Detail!))
+                .ToList();
+        var drafts = ActivitySegmenter.Segment(facets, facet => Identify(facet, constantsByProcess), endings, closings);
         return drafts.Select(draft => ToRecord(session.Id, draft)).ToList();
     }
 
@@ -301,7 +309,76 @@ public sealed class ActivityBuilder
             0);
     }
 
-    private async Task<ActivityRecord> NarrateAsync(ActivityRecord activity, CancellationToken cancellationToken)
+    /// <summary>
+    /// Summarizes what is being recorded right now, activity by activity, as
+    /// each one ends, so stopping only has the last few left to do. An
+    /// activity has ended when its app was closed, or when something else has
+    /// been going on for longer than it could still be resumed. The summaries
+    /// wait until the session is sealed and are then moved onto the stored
+    /// activities; nothing here changes what is stored for the session.
+    /// </summary>
+    public async Task<int> NarrateEndedAsync(
+        long nowMilliseconds,
+        int maxNarrations,
+        CancellationToken cancellationToken = default)
+    {
+        if (_narrator is null || maxNarrations <= 0)
+        {
+            return 0;
+        }
+
+        var live = BuildLive();
+        if (live.Count == 0)
+        {
+            return 0;
+        }
+
+        var lastStart = live.Max(activity => activity.StartedAtMilliseconds);
+        var closes = _store.GetMarkers(live.Min(a => a.StartedAtMilliseconds), nowMilliseconds)
+            .Where(marker => marker.ClosesApp)
+            .ToList();
+        var narrated = 0;
+        foreach (var activity in live
+                     .Where(activity => activity.Check == SummaryCheck.Pending)
+                     .OrderBy(activity => activity.EndedAtMilliseconds))
+        {
+            if (narrated >= maxNarrations)
+            {
+                break;
+            }
+
+            var appKey = activity.Key.Split('|')[0];
+            var closed = closes.Any(marker => marker.TimestampMilliseconds >= activity.EndedAtMilliseconds - 1_000
+                && string.Equals(marker.Detail, appKey, StringComparison.OrdinalIgnoreCase));
+            var movedOn = activity.StartedAtMilliseconds < lastStart
+                && nowMilliseconds - activity.EndedAtMilliseconds > ActivitySegmenter.ResumeWithinMilliseconds;
+            if ((!closed && !movedOn) || _store.HasEarlyNarration(activity))
+            {
+                continue;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            ActivityRecord described;
+            try
+            {
+                described = await NarrateAsync(activity, cancellationToken, live).ConfigureAwait(false);
+            }
+            catch (InvalidDataException)
+            {
+                described = activity with { Check = SummaryCheck.Fallback };
+            }
+
+            _store.SaveEarlyNarration(described, nowMilliseconds);
+            narrated++;
+        }
+
+        return narrated;
+    }
+
+    private async Task<ActivityRecord> NarrateAsync(
+        ActivityRecord activity,
+        CancellationToken cancellationToken,
+        IReadOnlyList<ActivityRecord>? neighbours = null)
     {
         var text = ActivityText.Build(_store.GetScanTexts(activity.ScanIds));
         if (text.Length < MinimumNarrationCharacters)
@@ -321,8 +398,8 @@ public sealed class ActivityBuilder
                 cancellationToken)
             .ConfigureAwait(false);
 
-        var others = _store.GetSessionActivities(activity.SessionId)
-            .Where(other => other.Id != activity.Id && other.Key != activity.Key)
+        var others = (neighbours ?? _store.GetSessionActivities(activity.SessionId))
+            .Where(other => other.Key != activity.Key)
             .Select(other => $"{other.Subject} {string.Join(' ', other.Phases)}");
         var metadata = new List<string> { activity.App, activity.Subject };
         if (activity.Site is not null)

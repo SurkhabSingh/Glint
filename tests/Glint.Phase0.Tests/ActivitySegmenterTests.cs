@@ -158,7 +158,43 @@ public sealed class ActivitySegmenterTests
         Assert.Equal(4 * Minute, Segment(facets).First().ActiveMilliseconds);
     }
 
-    private static IReadOnlyList<ActivityDraft> Segment(IReadOnlyList<ScanFacet> facets, IReadOnlyList<long>? endings = null) =>
+    [Fact]
+    public void ClosingTheGameEndsItThereAndReopeningIsANewSession()
+    {
+        var facets = new List<ScanFacet>
+        {
+            Facet("P4G", "P4G", 0, 40 * Minute, ActivityMode.Play),
+            Facet("Discord", "@Sam - Discord", 40 * Minute + 30 * Second, 42 * Minute),
+            // Back in the game two minutes later: normally a resume.
+            Facet("P4G", "P4G", 44 * Minute, 60 * Minute, ActivityMode.Play)
+        };
+
+        var drafts = Segment(facets, closings: [(T0 + (40 * Minute) + (10 * Second), "p4g")]);
+
+        var games = drafts.Where(draft => draft.Identity.Mode == ActivityMode.Play).ToList();
+        Assert.Equal(2, games.Count);
+        // Without the close the 30 s before Discord would be filled in as play.
+        Assert.Equal(T0 + (40 * Minute) + (10 * Second), games[0].EndedAtMilliseconds);
+        Assert.DoesNotContain(games[0].Events, item => item.Kind == "interrupted");
+    }
+
+    [Fact]
+    public void WithoutACloseTheSameReturnIsAResume()
+    {
+        var facets = new List<ScanFacet>
+        {
+            Facet("P4G", "P4G", 0, 40 * Minute, ActivityMode.Play),
+            Facet("Discord", "@Sam - Discord", 40 * Minute + 30 * Second, 42 * Minute),
+            Facet("P4G", "P4G", 44 * Minute, 60 * Minute, ActivityMode.Play)
+        };
+
+        Assert.Single(Segment(facets), draft => draft.Identity.Mode == ActivityMode.Play);
+    }
+
+    private static IReadOnlyList<ActivityDraft> Segment(
+        IReadOnlyList<ScanFacet> facets,
+        IReadOnlyList<long>? endings = null,
+        IReadOnlyList<(long At, string AppKey)>? closings = null) =>
         ActivitySegmenter.Segment(facets, facet =>
         {
             var known = ActivityCatalog.ForProcess(facet.ProcessName)
@@ -171,7 +207,7 @@ public sealed class ActivitySegmenterTests
                 facet.Mode ?? known.Mode,
                 known.Category,
                 null);
-        }, endings);
+        }, endings, closings);
 
     private static ScanFacet Facet(
         string process,

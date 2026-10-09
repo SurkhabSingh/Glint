@@ -177,51 +177,38 @@ public sealed class SessionizerTests
     }
 
     [Fact]
-    public void ALongStretchIsCappedIntoSeveralSessions()
+    public void AThreeHourStretchIsOneSessionHoweverLong()
     {
-        // One capture a minute for two hours, never idle.
+        // A game played for three hours, one look a minute, never idle.
         List<CaptureRow> captures = [];
-        for (var minute = 0; minute <= 120; minute++)
+        for (var minute = 0; minute <= 180; minute++)
         {
             captures.Add(Capture(minute * 60_000));
         }
 
-        var sessions = Sessionizer.Cluster(captures, Quiet(120 * 60_000));
+        var session = Assert.Single(Sessionizer.Cluster(captures, Quiet(180 * 60_000)));
+        Assert.Equal(Start + (180 * 60_000), session.EndedAtMilliseconds);
+    }
 
-        Assert.True(sessions.Count >= 2, "a two-hour stretch should be split by the cap");
-        foreach (var session in sessions)
-        {
-            Assert.True(
-                session.EndedAtMilliseconds - session.StartedAtMilliseconds
-                    <= Sessionizer.MaxSessionMilliseconds,
-                "no session may exceed the cap");
-        }
+    [Theory]
+    [InlineData("user.locked")]
+    [InlineData("system.sleep")]
+    [InlineData("system.shutdown")]
+    public void LockingSleepingOrShuttingDownEndsTheSitting(string kind)
+    {
+        List<CaptureRow> captures = [Capture(0), Capture(60_000), Capture(20 * 60_000)];
+        List<ActivityMarker> markers = [new(Start + 61_000, kind)];
+
+        Assert.Equal(2, Sessionizer.Cluster(captures, Quiet(20 * 60_000), markers).Count);
     }
 
     [Fact]
-    public void AnOverlongStretchIsCutAtItsWidestPause()
+    public void ClosingAnAppIsNotTheEndOfTheSitting()
     {
-        // Half an hour of work, a four-minute pause (short of the idle
-        // threshold, so it is not a boundary on its own), then another half
-        // hour. The whole thing outruns the cap and must be cut at the pause,
-        // not at whatever was happening 45 minutes in.
-        List<CaptureRow> captures = [];
-        for (var minute = 0; minute <= 30; minute += 2)
-        {
-            captures.Add(Capture(minute * 60_000));
-        }
+        List<CaptureRow> captures = [Capture(0), Capture(60_000), Capture(20 * 60_000)];
+        List<ActivityMarker> markers = [new(Start + 61_000, "app.closed", "p4g")];
 
-        const long resumeMinute = 34;
-        for (var minute = resumeMinute; minute <= 64; minute += 2)
-        {
-            captures.Add(Capture(minute * 60_000));
-        }
-
-        var sessions = Sessionizer.Cluster(captures, Quiet(64 * 60_000));
-
-        Assert.Equal(2, sessions.Count);
-        Assert.Equal(Start + (30 * 60_000), sessions[0].EndedAtMilliseconds);
-        Assert.Equal(Start + (resumeMinute * 60_000), sessions[1].StartedAtMilliseconds);
+        Assert.Single(Sessionizer.Cluster(captures, Quiet(20 * 60_000), markers));
     }
 
     [Fact]

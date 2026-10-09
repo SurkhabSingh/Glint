@@ -22,7 +22,6 @@ public sealed class LiteRtActivitySummarizer : IActivitySummarizer
             pythonExecutable,
             workerScript,
             modelPath,
-            backend: "cpu",
             maxNumTokens: 4096);
         ModelId = modelId;
     }
