@@ -9,7 +9,6 @@ $root = Split-Path -Parent $PSScriptRoot
 $cli = Join-Path $root "src\Glint.Phase0.Cli\bin\Debug\net9.0-windows10.0.22621.0\Glint.Phase0.Cli.exe"
 $wpf = Join-Path $root "tools\compatibility\Glint.Phase0.WpfTarget\bin\Debug\net9.0-windows10.0.22621.0\Glint.Phase0.WpfTarget.exe"
 $win32 = Join-Path $root "tools\compatibility\Glint.Phase0.Win32Target\bin\Debug\net9.0-windows10.0.22621.0\Glint.Phase0.Win32Target.exe"
-$winui = Join-Path $root "src\Glint.Phase0.App\bin\Debug\net9.0-windows10.0.22621.0\win-x64\Glint.Phase0.App.exe"
 $scratch = Join-Path $root "artifacts\compatibility\scratch"
 
 Add-Type @"
@@ -174,26 +173,6 @@ try {
     }
     finally {
         Stop-TestProcess $win32Target
-    }
-
-    $winuiTarget = Start-Process -FilePath $winui -PassThru
-    try {
-        $handle = Wait-MainWindow $winuiTarget
-        $results += [ordered]@{
-            target = "WinUI 3"
-            status = "completed"
-            result = Invoke-GlintCli "capture" $handle -KnownSafe
-        }
-    }
-    catch {
-        $results += [ordered]@{
-            target = "WinUI 3"
-            status = "failed"
-            error = $_.Exception.Message
-        }
-    }
-    finally {
-        Stop-TestProcess $winuiTarget
     }
 
     $calculatorBefore = @(Get-Process CalculatorApp -ErrorAction SilentlyContinue |

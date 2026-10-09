@@ -2,7 +2,7 @@ using Glint.Phase0.Core;
 
 namespace Glint.Phase0.Tests;
 
-/// The similarity check that replaced the exact hash of the whole text.
+/// What a look adds: the lines its page did not hold yet.
 public sealed class ChangeDetectionTests
 {
     private const string TradingPage =
@@ -14,23 +14,25 @@ public sealed class ChangeDetectionTests
         Order book
         """;
 
+    /// The keys a page holds once it has stored these texts.
+    private static HashSet<string> Known(params string[] texts) =>
+        texts.SelectMany(PageLines.Of).Select(line => line.Key).ToHashSet(StringComparer.Ordinal);
+
+    private static ChangeVerdict Compare(string text, IReadOnlySet<string> known) =>
+        ChangeMeter.Compare(PageLines.Of(text), known);
+
     [Fact]
     public void ATickingPriceIsNotAChange()
     {
-        var basis = ChangeMeter.Basis([TradingPage]);
         var ticked = TradingPage.Replace("187.42 ▲0.3%", "187.51 ▲0.4%").Replace("Bid 187.40 Ask 187.44", "Bid 187.49 Ask 187.53");
 
-        var verdict = ChangeMeter.Compare(ticked, basis, 10_000);
-
-        Assert.Equal(ChangeVerdictKind.Same, verdict.Kind);
+        Assert.Equal(ChangeVerdictKind.Same, Compare(ticked, Known(TradingPage)).Kind);
     }
 
     [Fact]
     public void AnOcrMisreadInsideANumberIsNotAChange()
     {
-        var basis = ChangeMeter.Basis(["Total due 1,050.00 on Friday"]);
-
-        var verdict = ChangeMeter.Compare("Total due 1,O5O.00 on Friday", basis, 10_000);
+        var verdict = Compare("Total due 1,O5O.00 on Friday", Known("Total due 1,050.00 on Friday"));
 
         Assert.Equal(ChangeVerdictKind.Same, verdict.Kind);
     }
@@ -38,52 +40,46 @@ public sealed class ChangeDetectionTests
     [Fact]
     public void ANewLineIsSavedOnItsOwn()
     {
-        var basis = ChangeMeter.Basis([TradingPage]);
+        var verdict = Compare(TradingPage + "\nOrder filled · Buy 10 AAPL", Known(TradingPage));
 
-        var verdict = ChangeMeter.Compare(TradingPage + "\nOrder filled · Buy 10 AAPL", basis, 10_000);
-
-        Assert.Equal(ChangeVerdictKind.Delta, verdict.Kind);
-        Assert.Equal(["Order filled · Buy 10 AAPL"], verdict.Lines);
+        Assert.Equal(ChangeVerdictKind.New, verdict.Kind);
+        Assert.Equal(["Order filled · Buy 10 AAPL"], verdict.Lines.Select(line => line.Text));
     }
 
     [Fact]
-    public void ADifferentScreenGetsAFullCopy()
+    public void AFirstVisitStoresEveryLineAsItWasRead()
     {
-        var basis = ChangeMeter.Basis([TradingPage]);
+        var verdict = Compare(TradingPage, new HashSet<string>());
 
-        var verdict = ChangeMeter.Compare(
-            "Portfolio\nHoldings overview\nCash balance\nMonthly statement\nTax documents",
-            basis,
-            10_000);
-
-        Assert.Equal(ChangeVerdictKind.Keyframe, verdict.Kind);
+        Assert.Equal(ChangeVerdictKind.New, verdict.Kind);
+        Assert.Equal(5, verdict.Lines.Count);
+        // Compared by its tidied key, stored as it was on screen.
+        Assert.Contains(verdict.Lines, line => line.Text == "187.42 ▲0.3%");
     }
 
     [Fact]
-    public void AFirstVisitAndAStaleCopyBothGetAFullCopy()
+    public void ADifferentScreenStoresOnlyItsOwnLines()
     {
-        Assert.Equal(ChangeVerdictKind.Keyframe, ChangeMeter.Compare(TradingPage, new HashSet<string>(), null).Kind);
+        var verdict = Compare(
+            "Portfolio\nHoldings overview\nOrder book\nMonthly statement",
+            Known(TradingPage));
 
-        var basis = ChangeMeter.Basis([TradingPage]);
-        var later = ChangeMeter.Compare(TradingPage + "\nPrice alert set", basis, ChangeMeter.KeyframeEveryMilliseconds);
-        Assert.Equal(ChangeVerdictKind.Keyframe, later.Kind);
+        Assert.Equal(["Portfolio", "Holdings overview", "Monthly statement"], verdict.Lines.Select(line => line.Text));
     }
 
     [Fact]
     public void VideoFrameDebrisIsNotAChange()
     {
-        var basis = ChangeMeter.Basis(["Cyberpunk: Edgerunners Episode 2\nComments\nRelated videos"]);
+        var known = Known("Cyberpunk: Edgerunners Episode 2\nComments\nRelated videos");
 
-        Assert.Equal(ChangeVerdictKind.Same, ChangeMeter.Compare("Cyberpunk: Edgerunners Episode 2\n、 ミ 、\n4 一 ′ 第", basis, 10_000).Kind);
-        Assert.Equal(ChangeVerdictKind.Same, ChangeMeter.Compare("、 ミ 、", new HashSet<string>(), null).Kind);
+        Assert.Equal(ChangeVerdictKind.Same, Compare("Cyberpunk: Edgerunners Episode 2\n、 ミ 、\n4 一 ′ 第", known).Kind);
+        Assert.Equal(ChangeVerdictKind.Same, Compare("、 ミ 、", new HashSet<string>()).Kind);
     }
 
     [Fact]
     public void EmbeddedObjectPlaceholdersAreNotText()
     {
-        var basis = ChangeMeter.Basis(["Skip Intro and continue watching"]);
-
-        var verdict = ChangeMeter.Compare("\uFFFC\uFFFCSkip Intro and continue watching\uFFFC", basis, 10_000);
+        var verdict = Compare("￼￼Skip Intro and continue watching￼", Known("Skip Intro and continue watching"));
 
         Assert.Equal(ChangeVerdictKind.Same, verdict.Kind);
     }
@@ -103,12 +99,37 @@ public sealed class ChangeDetectionTests
     [Fact]
     public void NumbersTheUserTypesAreKept()
     {
-        var basis = ChangeMeter.Basis([TradingPage + "\n" + ChangeMeter.InputPrefix + "Quantity 1"]);
+        var known = Known(TradingPage + "\n" + ChangeMeter.InputPrefix + "Quantity 1");
 
-        var verdict = ChangeMeter.Compare(TradingPage + "\n" + ChangeMeter.InputPrefix + "Quantity 10", basis, 10_000);
+        var verdict = Compare(TradingPage + "\n" + ChangeMeter.InputPrefix + "Quantity 10", known);
 
-        Assert.Equal(ChangeVerdictKind.Delta, verdict.Kind);
-        Assert.Contains(ChangeMeter.InputPrefix + "Quantity 10", verdict.Lines);
+        Assert.Equal(ChangeVerdictKind.New, verdict.Kind);
+        var typed = Assert.Single(verdict.Lines);
+        Assert.Equal(ChangeMeter.InputPrefix + "Quantity 10", typed.Text);
+        Assert.True(typed.Typed);
+    }
+
+    [Fact]
+    public void AnActivitysTextReadsAsItsScreenThenWhatWasNew()
+    {
+        const long start = 10_000;
+        PageChunk Chunk(long id, string text, long first, string scan, bool you = false) =>
+            new(id, "chrome|mail|inbox", text, first, first + 60_000, scan, false, you);
+
+        var texts = ActivityTexts.Group(
+            [
+                Chunk(1, "Inbox (3)", 1_000, "earlier"),
+                Chunk(2, "Meeting moved to Friday", start + 1_000, "look-1"),
+                Chunk(3, "Thanks, will do", start + 5_000, "look-2", you: true)
+            ],
+            start);
+
+        // Already on the page when it began: its screen.
+        Assert.Equal(CaptureChange.Keyframe, texts[0].Change);
+        Assert.Equal("Inbox (3)", texts[0].Text);
+        // What appeared during it, look by look, the user's own reply marked.
+        Assert.Equal([CaptureChange.Delta, CaptureChange.Delta], texts.Skip(1).Select(text => text.Change));
+        Assert.True(texts[2].UserCaused);
     }
 
     [Fact]

@@ -30,6 +30,7 @@ public sealed record ManualScanRecord(
     string? RedactedUiAutomationText = null,
     string? RedactedOcrText = null,
     string? OcrLanguage = null,
+    // The session this look falls in, worked out when it is read; never stored.
     string? SessionId = null,
     // Activity facets. Null on captures stored before the activity model,
     // which the segmenter then derives from the process and title instead.
@@ -45,7 +46,8 @@ public sealed record ManualScanRecord(
     bool UserCaused = false,
     bool Unsaved = false,
     string? DialogTitle = null,
-    string? EventKind = null);
+    string? EventKind = null,
+    string? ExecutablePath = null);
 
 public sealed record ContextSearchResult(
     string Id,
@@ -91,17 +93,6 @@ public sealed record ActivitySummary(
     string? ImportantSignals = null,
     string? ReminderCandidate = null,
     int ContextCharacters = LiteRtActivitySummarizer.DefaultContextCharacters);
-
-public interface IManualScanStore
-{
-    bool ContainsManualScanContentHash(string contentHash);
-
-    bool IsRepeatOfLastCapture(string contentHash);
-
-    void SaveManualScan(RawCaptureEvent captureEvent, ManualScanRecord scan);
-
-    IReadOnlyList<ManualScanRecord> GetRecentManualScans(int limit = 50);
-}
 
 public enum ActivitySessionStatus
 {
@@ -169,15 +160,6 @@ public sealed record ActivitySession(
     // Sessions carrying the same outstanding thing. Null when nothing was
     // left outstanding, or when nothing matched confidently.
     string? ThreadId = null);
-
-public interface ISessionStore
-{
-    ActivitySession? GetOpenSession();
-
-    void UpsertSession(ActivitySession session);
-
-    IReadOnlyList<ActivitySession> GetRecentSessions(int limit = 50);
-}
 
 public interface IActivitySummarizer
 {

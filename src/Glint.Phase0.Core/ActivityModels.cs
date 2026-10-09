@@ -50,17 +50,17 @@ public enum ActivityCategory
 }
 
 /// <summary>
-/// What a look at the screen added, decided by comparing it with the same
-/// page's previous looks rather than with whatever window came last.
+/// What a look at the screen added, decided by comparing its lines with the
+/// lines the same page already holds.
 /// </summary>
 [JsonConverter(typeof(JsonStringEnumConverter))]
 public enum CaptureChange
 {
-    /// A full copy of the page: first visit, a different screen, or the
-    /// periodic refresh.
+    /// A full copy of the page. Only looks stored before page lines existed
+    /// carry this; their text was moved into page lines.
     Keyframe,
 
-    /// Only the lines that were new since the page's last copy.
+    /// Lines the page did not hold yet were stored.
     Delta,
 
     /// A record that the app was in front, with no text: games, video,
@@ -187,7 +187,9 @@ public sealed record ActivityRecord(
     bool TaskSetByUser,
     SummaryCheck Check,
     int FactsKept,
-    int FactsDropped);
+    int FactsDropped,
+    // The pages this activity's looks were on: where its text is found.
+    IReadOnlyList<string>? PageKeys = null);
 
 /// <summary>
 /// What the segmenter needs to know about one stored look. Text is not
@@ -211,12 +213,9 @@ public sealed record ScanFacet(
     string? DialogTitle,
     string? EventKind,
     bool UserCaused,
-    // From the capture's raw event, so history stored before activities
-    // existed can still be recognized as a game by its install folder.
-    string? ExecutablePath = null,
-    // Set once the record is sealed into a session; a sealed record is
-    // history and is never extended again.
-    string? SessionId = null);
+    // So history stored before games were recognized can still be
+    // recognized as a game by its install folder.
+    string? ExecutablePath = null);
 
 /// One stored look with its text, for building a summary prompt.
 public sealed record ScanText(
@@ -232,21 +231,68 @@ public sealed record PageState(
     FrameSignature? Signature,
     byte[] LiveCounts,
     long SignatureAtMilliseconds,
-    long KeyframeAtMilliseconds,
+    // When this page's text was last read. Lines seen then are the ones
+    // still on screen when a later picture check finds nothing changed.
+    long TextReadAtMilliseconds,
     long UpdatedAtMilliseconds,
     // Whether the screen moved at the last picture check: in Play and Watch
     // that means the user is watching, not away.
     bool Moving = false);
 
-public sealed record ActivityBuildResult(
-    int SessionsProcessed,
-    int Activities,
-    int Narrated,
-    int NarrationFailed,
-    int Verified,
-    int Partial,
-    int Fallback);
+/// <summary>
+/// One distinct line of a page, as a look read it. Lines are compared by
+/// <see cref="Key"/> (tidied: numbers folded, case evened) and stored once
+/// per page, however many looks see them.
+/// </summary>
+public sealed record PageLine(string Key, string Text, bool Typed);
 
+/// <summary>
+/// A stored line of page text: the unit search, summaries and Ask read.
+/// Seen from <see cref="FirstSeenMilliseconds"/> to <see cref="LastSeenMilliseconds"/>,
+/// first stored by the look <see cref="ScanId"/>.
+/// </summary>
+public sealed record PageChunk(
+    long Id,
+    string PageKey,
+    string Text,
+    long FirstSeenMilliseconds,
+    long LastSeenMilliseconds,
+    string? ScanId,
+    bool Typed,
+    bool UserCaused);
+
+/// <summary>
+/// One stretch of time a window was in front, from the moment it came to the
+/// front until something else did, the user left, or recording stopped.
+/// </summary>
+public sealed record FocusRow(
+    long Id,
+    long StartedAtMilliseconds,
+    long? EndedAtMilliseconds,
+    long LastSeenMilliseconds,
+    string ProcessName,
+    // Null when the privacy gate kept the title out.
+    string? Title,
+    string? Suppressed,
+    string? SuppressedDetail);
+
+/// <summary>
+/// A description written for an activity, kept so it is never paid for twice.
+/// Found again by the activity's key and start, or by its text when the same
+/// activity comes out of a rebuild starting elsewhere.
+/// </summary>
+public sealed record StoredSummary(
+    string ActivityKey,
+    long StartedAtMilliseconds,
+    string? TextHash,
+    string Label,
+    string? Summary,
+    string? Task,
+    SummaryCheck Check,
+    int FactsKept,
+    int FactsDropped);
+
+/// What one look needs from storage.
 public interface IActivityStore
 {
     AppProfile? GetAppProfile(string key);
@@ -262,51 +308,70 @@ public interface IActivityStore
     /// The most recent stored look, any window.
     ScanFacet? GetLatestFacet();
 
+    /// When the newest marker that ends a stretch (stop, away, lock, sleep,
+    /// shutdown) was recorded; 0 if there is none. A look older than that is
+    /// never extended across it.
+    long GetLatestBreakMilliseconds();
+
     /// Recent titles of one app, newest first, so the noise in its titles
     /// (the app name, counters) can be learned.
     IReadOnlyList<string> GetRecentTitles(string processName, int limit = 40);
 
-    /// Text of a page since (and including) its latest full copy, oldest first.
-    IReadOnlyList<string> GetPageBasis(string pageKey, int limit = 60);
+    /// Which of these line keys the page already holds.
+    IReadOnlySet<string> GetKnownLines(string pageKey, IReadOnlyCollection<string> lineKeys);
 
-    void SaveFacetScan(RawCaptureEvent? captureEvent, ManualScanRecord scan);
+    /// Stores a look, and the page lines it was the first to see.
+    void SaveLook(ManualScanRecord look, IReadOnlyList<PageLine>? newLines = null);
+
+    /// Marks lines the page already holds as on screen now.
+    void TouchLines(string pageKey, IReadOnlyCollection<string> lineKeys, long nowMilliseconds);
+
+    /// Marks the lines read at <paramref name="readAtMilliseconds"/> as still
+    /// on screen now: a picture check found nothing had changed.
+    void TouchLinesSeenAt(string pageKey, long readAtMilliseconds, long nowMilliseconds);
 
     /// Extends a stored look instead of saving a duplicate.
     void TouchScan(string scanId, long lastSeenMilliseconds);
 }
 
-/// What startup recovery found: whether an unfinished recording was closed,
-/// and how much is waiting to be grouped or summarized.
-public sealed record RecoveryResult(bool ClosedRun, long? ClosedAtMilliseconds, long Pending);
-
-public interface IActivityWorkStore
+/// What working out activities on demand reads. Nothing here is written.
+public interface IActivityViewStore
 {
-    IReadOnlyList<CaptureRow> GetUnassignedCaptures(int limit = 1_000);
+    /// Looks in front at some point in [from, to), oldest first.
+    IReadOnlyList<ScanFacet> GetFacetsBetween(long fromMilliseconds, long toMilliseconds);
+
+    /// When the newest look that ended before <paramref name="beforeMilliseconds"/> was last seen, if any.
+    long? GetLastLookEndBefore(long beforeMilliseconds);
 
     IReadOnlyList<ActivityMarker> GetMarkers(long fromMilliseconds, long toMilliseconds);
 
-    IReadOnlyList<ActivitySession> GetSessionsWithoutActivities(int limit = 50);
+    IReadOnlyList<AppProfile> GetAppProfiles();
 
-    IReadOnlyList<ScanFacet> GetScanFacets(IReadOnlyList<string> scanIds);
+    IReadOnlyList<StoredSummary> GetSummaries(IReadOnlyCollection<string> activityKeys);
 
-    IReadOnlyList<ScanText> GetScanTexts(IReadOnlyList<string> scanIds);
+    IReadOnlyDictionary<string, ActivityTaskStatus> GetTaskStatuses(IReadOnlyCollection<string> activityIds);
 
-    void ReplaceSessionActivities(
-        ActivitySession session,
-        IReadOnlyList<ActivityRecord> activities);
+    IReadOnlyDictionary<string, SessionOutcome> GetSessionOutcomes(IReadOnlyCollection<string> sessionIds);
 
-    IReadOnlyList<ActivityRecord> GetActivitiesPendingNarration(int limit = 10);
+    /// Lines of these pages on screen at some point in [from, to), oldest first.
+    IReadOnlyList<PageChunk> GetPageChunks(IReadOnlyCollection<string> pageKeys, long fromMilliseconds, long toMilliseconds);
+}
 
-    IReadOnlyList<ActivityRecord> GetSessionActivities(string sessionId);
+/// Stable ids for things worked out on demand, so a user's choice about an
+/// activity or a session finds it again however often it is rebuilt.
+public static class ActivityIds
+{
+    public static string Activity(string key, long startedAtMilliseconds) =>
+        "a" + Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes($"{key}@{startedAtMilliseconds}")))[..24]
+            .ToLowerInvariant();
 
-    void UpdateActivity(ActivityRecord activity);
+    /// A session is named after its first look, which never changes.
+    public static string Session(string firstLookId) => "s" + firstLookId;
 
-    void UpsertSession(ActivitySession session);
-
-    ActivitySession? GetSession(string id);
-
-    /// A summary written while recording, kept until its session is sealed.
-    void SaveEarlyNarration(ActivityRecord activity, long nowMilliseconds);
-
-    bool HasEarlyNarration(ActivityRecord activity);
+    public static string TextHash(string text) =>
+        Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)))[..32]
+            .ToLowerInvariant();
 }

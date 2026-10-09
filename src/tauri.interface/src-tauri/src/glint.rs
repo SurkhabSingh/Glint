@@ -1,9 +1,6 @@
-//! Glint Phase 0 frontend bridge.
-//!
-//! Ports `Glint.Phase0.App/MainViewModel.cs` (which called
-//! `Glint.Phase0.Core` directly) onto Tauri commands backed by the
-//! `Glint.Phase0.Cli` sidecar — see `bridge.rs` for the transport.
-//! All user-facing strings mirror the WinUI view model verbatim.
+//! Glint's Tauri commands. Every one that touches the store, the screen or
+//! the model is a request to the backend process (`backend.rs`); the host
+//! itself only decides when to look and listens to Windows.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -288,7 +285,7 @@ fn outcome_payload(outcome: &serde_json::Value, tick_id: Option<u64>) -> serde_j
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
             let label = record.get("label").and_then(|v| v.as_str()).unwrap_or("");
-            format!("{process}: {label}. Captured; summary lands when scanning stops.")
+            format!("{process}: {label}. Captured.")
         }
         "ModelFailed" | "DroppedSecretFrame" | "Failed" => {
             format!("{detail} Continuing to scan.")
@@ -300,7 +297,7 @@ fn outcome_payload(outcome: &serde_json::Value, tick_id: Option<u64>) -> serde_j
 
     let overall = match kind_name {
         "Completed" => overall_success(
-            "The window was captured and saved. Its summary lands in the session when scanning stops."
+            "The window was captured and saved. Its summary is written once the activity ends and you step away."
                 .to_string(),
         ),
         "Unchanged" | "Suppressed" => overall_info(capture_summary.clone()),
@@ -327,24 +324,11 @@ fn outcome_payload(outcome: &serde_json::Value, tick_id: Option<u64>) -> serde_j
 struct ScanState {
     scanning: bool,
     generation: u64,
-    /// In-flight scan child: taken by whichever select branch wins.
-    /// Short synchronous takes only — never held across await.
-    child: Option<tokio::process::Child>,
-}
-
-fn take_child(app: &AppHandle) -> Option<tokio::process::Child> {
-    let runtime: State<ScanRuntime> = app.state();
-    let child = runtime.state.lock().unwrap().child.take();
-    child
 }
 
 pub struct ScanRuntime {
     state: Mutex<ScanState>,
     cancel: watch::Sender<u64>,
-    /// Serializes every local-model invocation (scan ticks, single
-    /// captures, agent questions) so two model processes never contend
-    /// for RAM with overlapping full loads.
-    model_lock: tokio::sync::Mutex<()>,
 }
 
 impl Default for ScanRuntime {
@@ -353,12 +337,9 @@ impl Default for ScanRuntime {
         Self {
             state: Mutex::new(ScanState::default()),
             cancel,
-            model_lock: tokio::sync::Mutex::new(()),
         }
     }
 }
-
-
 
 fn is_current(app: &AppHandle, generation: u64) -> bool {
     let runtime: State<ScanRuntime> = app.state();
@@ -376,136 +357,68 @@ pub(crate) fn scanning_now(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
-/// 30 s dwell heartbeat tied to a scan generation (ports the heartbeat
-/// half of the timeline fast lane).
-async fn heartbeat_loop(app: AppHandle, generation: u64) {
-    loop {
-        {
-            let runtime: State<ScanRuntime> = app.state::<ScanRuntime>();
-            let mut rx = runtime.cancel.subscribe();
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
-                _ = rx.changed() => {
-                    if !is_current(&app, generation) {
-                        return;
-                    }
-                }
-            }
-        }
-        if !is_current(&app, generation) {
-            return;
-        }
-        crate::timeline::record_heartbeat(&app);
-    }
+/// One request to the backend from a command.
+async fn call(app: &AppHandle, request: serde_json::Value) -> Result<serde_json::Value, String> {
+    crate::backend::request(app, request, crate::backend::QUICK_TIMEOUT).await
 }
 
 /// Record the user's verdict on a session. Absolute: no rule overwrites it.
-#[tauri::command(async)]
-pub fn glint_set_session_outcome(
+#[tauri::command]
+pub async fn glint_set_session_outcome(
     app: AppHandle,
     id: String,
     outcome: String,
 ) -> Result<serde_json::Value, String> {
-    let root = crate::bridge::data_root()?;
-    let mut args = vec![
-        "session-outcome".to_string(),
-        "--id".to_string(),
-        id,
-        "--outcome".to_string(),
-        outcome,
-    ];
-    args.extend(crate::bridge::db_args(&app, &root));
-    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
-    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+    call(&app, serde_json::json!({ "op": "session-outcome", "id": id, "outcome": outcome })).await
 }
 
 /// Agent chat threads, most recently active first. Chat text lives only in
-/// the encrypted store; these verbs carry user content the same way `ask`
-/// does (sidecar argv, never metrics).
-#[tauri::command(async)]
-pub fn glint_chat_threads(app: AppHandle, limit: Option<u32>) -> Result<serde_json::Value, String> {
-    let root = crate::bridge::data_root()?;
-    let requested = limit.unwrap_or(50).clamp(1, 200).to_string();
-    let mut args = vec!["chat-threads".to_string(), "--limit".to_string(), requested];
-    args.extend(crate::bridge::db_args(&app, &root));
-    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
-    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+/// the encrypted store and travels over the backend's pipe, never in argv.
+#[tauri::command]
+pub async fn glint_chat_threads(app: AppHandle, limit: Option<u32>) -> Result<serde_json::Value, String> {
+    call(&app, serde_json::json!({ "op": "chat-threads", "limit": limit.unwrap_or(50).clamp(1, 200) })).await
 }
 
 /// One thread with its messages, oldest first.
-#[tauri::command(async)]
-pub fn glint_chat_thread(
+#[tauri::command]
+pub async fn glint_chat_thread(
     app: AppHandle,
     id: String,
     limit: Option<u32>,
 ) -> Result<serde_json::Value, String> {
-    let root = crate::bridge::data_root()?;
-    let requested = limit.unwrap_or(200).clamp(1, 2000).to_string();
-    let mut args = vec![
-        "chat-thread".to_string(),
-        "--id".to_string(),
-        id,
-        "--limit".to_string(),
-        requested,
-    ];
-    args.extend(crate::bridge::db_args(&app, &root));
-    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
-    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+    call(&app, serde_json::json!({ "op": "chat-thread", "id": id, "limit": limit.unwrap_or(200).clamp(1, 2000) })).await
 }
 
 /// Start a thread. Titles come from the first question (truncated upstream),
 /// never model-generated, so opening a chat costs no inference.
-#[tauri::command(async)]
-pub fn glint_chat_create(
+#[tauri::command]
+pub async fn glint_chat_create(
     app: AppHandle,
     title: String,
     scope: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let root = crate::bridge::data_root()?;
-    let mut args = vec!["chat-create".to_string(), "--title".to_string(), title];
-    if let Some(scope) = scope {
-        args.push("--scope".to_string());
-        args.push(scope);
-    }
-    args.extend(crate::bridge::db_args(&app, &root));
-    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
-    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+    call(&app, serde_json::json!({ "op": "chat-create", "title": title, "scope": scope })).await
 }
 
 /// Rename a thread.
-#[tauri::command(async)]
-pub fn glint_chat_rename(
+#[tauri::command]
+pub async fn glint_chat_rename(
     app: AppHandle,
     id: String,
     title: String,
 ) -> Result<serde_json::Value, String> {
-    let root = crate::bridge::data_root()?;
-    let mut args = vec![
-        "chat-rename".to_string(),
-        "--id".to_string(),
-        id,
-        "--title".to_string(),
-        title,
-    ];
-    args.extend(crate::bridge::db_args(&app, &root));
-    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
-    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+    call(&app, serde_json::json!({ "op": "chat-rename", "id": id, "title": title })).await
 }
 
 /// Delete a thread and its messages.
-#[tauri::command(async)]
-pub fn glint_chat_delete(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
-    let root = crate::bridge::data_root()?;
-    let mut args = vec!["chat-delete".to_string(), "--id".to_string(), id];
-    args.extend(crate::bridge::db_args(&app, &root));
-    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
-    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+#[tauri::command]
+pub async fn glint_chat_delete(app: AppHandle, id: String) -> Result<serde_json::Value, String> {
+    call(&app, serde_json::json!({ "op": "chat-delete", "id": id })).await
 }
 
-/// Append one message. Used by `glint_ask` to persist turns, and exposed for
-/// completeness; chat text never reaches metrics or logs.
-#[tauri::command(async)]
-pub fn glint_chat_append(
+/// Append one message. `glint_ask` keeps its own turns; this is for the rest.
+#[tauri::command]
+pub async fn glint_chat_append(
     app: AppHandle,
     thread: String,
     role: String,
@@ -513,50 +426,46 @@ pub fn glint_chat_append(
     citations: Option<String>,
     scoped: Option<u32>,
 ) -> Result<serde_json::Value, String> {
-    let root = crate::bridge::data_root()?;
-    let mut args = vec![
-        "chat-append".to_string(),
-        "--thread".to_string(),
-        thread,
-        "--role".to_string(),
-        role,
-        "--text".to_string(),
-        text,
-    ];
-    if let Some(citations) = citations {
-        args.push("--citations".to_string());
-        args.push(citations);
-    }
-    if let Some(scoped) = scoped {
-        args.push("--scoped".to_string());
-        args.push(scoped.to_string());
-    }
-    args.extend(crate::bridge::db_args(&app, &root));
-    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
-    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+    call(
+        &app,
+        serde_json::json!({
+            "op": "chat-append",
+            "thread": thread,
+            "role": role,
+            "text": text,
+            "citations": citations,
+            "scoped": scoped,
+        }),
+    )
+    .await
 }
 
-/// Sessions with their summaries, newest first.
-#[tauri::command(async)]
-pub fn glint_sessions(app: AppHandle, limit: Option<u32>) -> Result<serde_json::Value, String> {
-    let root = crate::bridge::data_root()?;
-    let requested = limit.unwrap_or(50).clamp(1, 200).to_string();
-    let mut args = vec!["sessions".to_string(), "--limit".to_string(), requested];
-    args.extend(crate::bridge::db_args(&app, &root));
-    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
-    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+/// Sessions with their summaries, newest first, worked out when asked.
+#[tauri::command]
+pub async fn glint_sessions(app: AppHandle, limit: Option<u32>) -> Result<serde_json::Value, String> {
+    call(&app, serde_json::json!({ "op": "sessions", "limit": limit.unwrap_or(50).clamp(1, 200) })).await
 }
 
 /// Activities, newest first: one per thing the user did, each with its own
-/// mode, time, events and checked summary.
-#[tauri::command(async)]
-pub fn glint_activities(app: AppHandle, limit: Option<u32>) -> Result<serde_json::Value, String> {
-    let root = crate::bridge::data_root()?;
-    let requested = limit.unwrap_or(300).clamp(1, 1000).to_string();
-    let mut args = vec!["activities".to_string(), "--limit".to_string(), requested];
-    args.extend(crate::bridge::db_args(&app, &root));
-    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
-    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+/// mode, time, events and checked summary. `from`/`to` narrow it to a window
+/// (the last 30 days when left out).
+#[tauri::command]
+pub async fn glint_activities(
+    app: AppHandle,
+    limit: Option<u32>,
+    from: Option<i64>,
+    to: Option<i64>,
+) -> Result<serde_json::Value, String> {
+    call(
+        &app,
+        serde_json::json!({
+            "op": "activities",
+            "limit": limit.unwrap_or(300).clamp(1, 5000),
+            "from": from,
+            "to": to,
+        }),
+    )
+    .await
 }
 
 /// Whether Glint is running as administrator. Apps that run as
@@ -630,27 +539,17 @@ pub fn glint_set_zoom(app: AppHandle, scale: f64) -> Result<f64, String> {
 /// Time per activity inside [from, to): what the dashboard charts. Only
 /// app, site, subject, mode, category and the active segments cross over;
 /// no summaries or captured text.
-#[tauri::command(async)]
-pub fn glint_usage(app: AppHandle, from: i64, to: i64) -> Result<serde_json::Value, String> {
+#[tauri::command]
+pub async fn glint_usage(app: AppHandle, from: i64, to: i64) -> Result<serde_json::Value, String> {
     if to <= from {
         return Err("The end of the range must be after its start.".to_string());
     }
-    let root = crate::bridge::data_root()?;
-    let mut args = vec![
-        "usage".to_string(),
-        "--from".to_string(),
-        from.to_string(),
-        "--to".to_string(),
-        to.to_string(),
-    ];
-    args.extend(crate::bridge::db_args(&app, &root));
-    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
-    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+    call(&app, serde_json::json!({ "op": "usage", "from": from, "to": to })).await
 }
 
 /// The user's verdict on an activity's task. Absolute: no rule rewrites it.
-#[tauri::command(async)]
-pub fn glint_set_activity_task(
+#[tauri::command]
+pub async fn glint_set_activity_task(
     app: AppHandle,
     id: String,
     status: String,
@@ -658,22 +557,12 @@ pub fn glint_set_activity_task(
     if !matches!(status.as_str(), "Open" | "LooksDone" | "Done" | "None") {
         return Err(format!("Unknown task status: {status}"));
     }
-    let root = crate::bridge::data_root()?;
-    let mut args = vec![
-        "activity-task".to_string(),
-        "--id".to_string(),
-        id,
-        "--status".to_string(),
-        status,
-    ];
-    args.extend(crate::bridge::db_args(&app, &root));
-    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
-    Ok(crate::bridge::run_sidecar(&app, &arg_refs)?.json)
+    call(&app, serde_json::json!({ "op": "activity-task", "id": id, "status": status })).await
 }
 
-/// The user's correction of how an app or site is treated. Rebuilds the
-/// activity view so the correction shows on the timeline straight away.
-#[tauri::command(async)]
+/// The user's correction of how an app or site is treated. Activities are
+/// worked out when read, so the correction shows everywhere straight away.
+#[tauri::command]
 pub async fn glint_set_app_mode(
     app: AppHandle,
     key: String,
@@ -685,205 +574,47 @@ pub async fn glint_set_app_mode(
     if !matches!(mode.as_str(), "Read" | "Make" | "Play" | "Watch" | "Private") {
         return Err(format!("Unknown mode: {mode}"));
     }
-    let root = crate::bridge::data_root()?;
-    let mut args = vec![
-        "app-mode".to_string(),
-        "--key".to_string(),
-        key,
-        "--mode".to_string(),
-        mode,
-    ];
-    args.extend(crate::bridge::db_args(&app, &root));
-    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
-    let profile = crate::bridge::run_sidecar_async(&app, &arg_refs).await?.json;
-    // Re-segment without waiting for the next stop; descriptions already
-    // written are kept, so this costs no model call.
-    let scanning = app
-        .state::<ScanRuntime>()
-        .state
-        .lock()
-        .map(|state| state.scanning)
-        .unwrap_or(false);
-    if !scanning {
-        if let Some(result) = run_sessionize(&app, false).await {
-            let _ = app.emit("sessions-updated", &result);
-        }
-    }
+    let profile = call(&app, serde_json::json!({ "op": "app-mode", "key": key, "mode": mode })).await?;
+    let _ = app.emit("sessions-updated", serde_json::json!({ "corrected": 1 }));
     Ok(profile)
 }
 
 /// Record that the user went away or came back, or that recording started or
-/// stopped. The sessionizer reads these to tell a real break from a screen
-/// that simply did not change. Best effort: a lost marker only costs the
-/// fallback gap rule, so it never blocks the loop.
-fn record_marker(app: &AppHandle, kind: &'static str) {
+/// stopped. Grouping reads these to tell a real break from a screen that
+/// simply did not change. Best effort: a lost marker only costs the fallback
+/// gap rule. Blocks, so call it from a plain thread.
+fn record_marker(app: &AppHandle, kind: &str) {
     record_marker_detail(app, kind, None);
 }
 
 fn record_marker_detail(app: &AppHandle, kind: &str, detail: Option<&str>) {
-    // Through the capture worker: no process start, no database unlock.
-    // Stamped here, so the marker keeps its moment even if the worker is busy.
+    // Stamped here, so the marker keeps its moment even if the backend is busy.
     let at = chrono::Utc::now().timestamp_millis();
     let mut request = serde_json::json!({ "op": "mark", "kind": kind, "at": at });
     if let Some(detail) = detail {
         request["detail"] = serde_json::Value::String(detail.to_string());
     }
-    if crate::scan_server::request_blocking(app, request, crate::scan_server::QUICK_TIMEOUT).is_ok() {
-        return;
-    }
-    // Fallback: a one-off process, as before.
-    let Ok(root) = crate::bridge::data_root() else {
+    let Ok(reply) = crate::backend::request_blocking(app, request, crate::backend::QUICK_TIMEOUT) else {
         return;
     };
-    let mut args = vec![
-        "mark".to_string(),
-        "--kind".to_string(),
-        kind.to_string(),
-        "--at".to_string(),
-        at.to_string(),
-    ];
-    if let Some(detail) = detail {
-        args.push("--detail".to_string());
-        args.push(detail.to_string());
-    }
-    args.extend(crate::bridge::db_args(app, &root));
-    let arg_refs: Vec<&str> = args.iter().map(|value| value.as_str()).collect();
-    let _ = crate::bridge::run_sidecar(app, &arg_refs);
-}
-
-/// Group captures into sessions and summarize the finished ones. Runs under
-/// the model lock because it makes model calls, so it never overlaps a scan.
-/// Called when a scan stops (`seal_open`), never mid-scan: captures stay
-/// model-free while recording so inference cannot contend with them.
-async fn run_sessionize(app: &AppHandle, seal_open: bool) -> Option<serde_json::Value> {
-    run_sessionize_with(app, seal_open, false).await
-}
-
-/// `ended`: while recording, also summarize activities that have already
-/// ended (closed, or moved on from), a few at a time.
-async fn run_sessionize_with(app: &AppHandle, seal_open: bool, ended: bool) -> Option<serde_json::Value> {
-    let root = crate::bridge::data_root().ok()?;
-    let cli = crate::bridge::sidecar_path(app).ok()?;
-    let mut args = vec!["sessionize".to_string()];
-    if ended {
-        args.push("--ended".to_string());
-        args.push("--max-summaries".to_string());
-        args.push(ENDED_BATCH.to_string());
-    } else if !seal_open {
-        // A rebuild after a correction: segment only, no model calls.
-        args.push("--max-summaries".to_string());
-        args.push("0".to_string());
-    }
-    args.extend(crate::bridge::db_args(app, &root));
-    args.extend(crate::bridge::host_args());
-    if seal_open {
-        args.push("--seal-open".to_string());
-    }
-
-    let model_state: State<ScanRuntime> = app.state();
-    let _model = model_state.model_lock.lock().await;
-    let started = std::time::Instant::now();
-    let output = tokio::task::spawn_blocking(move || {
-        crate::bridge::hidden_command(&cli).args(&args).output()
-    })
-    .await
-    .ok()?
-    .ok()?;
-    crate::bridge::record_spawn(
-        "sessionize",
-        started.elapsed().as_millis(),
-        output.status.code().unwrap_or(-1),
-        None,
-    );
-    let result = serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&output.stdout)).ok()?;
-    note_ai_backend(&result);
-    Some(result)
-}
-
-/// Summaries per background pass while recording: small, so a pass is a
-/// few seconds on the GPU and never holds the model for long.
-const ENDED_BATCH: u32 = 4;
-
-/// How often recording looks for ended activities to summarize.
-const ENDED_EVERY: std::time::Duration = std::time::Duration::from_secs(90);
-
-static PROCESSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Summarize ended activities in the background, without holding up the
-/// scan loop. At most one pass at a time; a request while one is running is
-/// dropped (the next trigger picks the work up).
-pub(crate) fn process_ended_soon(app: &AppHandle) {
-    use std::sync::atomic::Ordering;
-    if PROCESSING.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Some(result) = run_sessionize_with(&app, false, true).await {
-            let busy = result.get("summarized").and_then(|v| v.as_u64()).unwrap_or(0)
-                + result.get("earlyNarrated").and_then(|v| v.as_u64()).unwrap_or(0)
-                + result.get("sealed").and_then(|v| v.as_u64()).unwrap_or(0);
-            if busy > 0 {
-                let _ = app.emit("sessions-updated", &result);
-            }
+    // A start or stop is a row of its own on the live timeline, and coming
+    // back starts a stretch in whatever is in front.
+    for row in ["timeline", "focus"] {
+        if let Some(row) = reply.get(row).filter(|row| row.is_object()) {
+            let _ = app.emit("timeline-event", row);
         }
-        PROCESSING.store(false, Ordering::SeqCst);
-    });
+    }
 }
 
 /// Locking, sleep, shutdown and closed apps, from `system_events`. Runs on
 /// a plain thread (never the async runtime), so the marker write can block.
+/// The backend ends the stretch in front and, once the user is away,
+/// describes what finished.
 pub(crate) fn on_system_event(app: &AppHandle, kind: &str, detail: Option<&str>) {
     if !scanning_now(app) {
         return;
     }
     record_marker_detail(app, kind, detail);
-    crate::timeline::record_lifecycle(app, kind);
-    match kind {
-        // Something just ended: summarize it now rather than at Stop.
-        "app.closed" | "user.locked" => process_ended_soon(app),
-        // Shutting down: the run never gets its stop. The marker is enough;
-        // startup recovery closes the run and summarizes it. (Sleep only ends
-        // the sitting: recording carries on after waking.)
-        "system.shutdown" => crate::timeline::eon_ended(app),
-        _ => {}
-    }
-}
-
-/// Startup: close a recording a crash or shutdown left open, then group and
-/// summarize whatever is waiting, in the background.
-pub(crate) fn recover_on_startup(app: &AppHandle) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let Ok(root) = crate::bridge::data_root() else {
-            return;
-        };
-        let mut args = vec!["recover".to_string()];
-        args.extend(crate::bridge::db_args(&app, &root));
-        let Ok(output) = crate::bridge::run_sidecar_async(&app, &args.iter().map(String::as_str).collect::<Vec<_>>()).await else {
-            return;
-        };
-        let pending = output.json.get("pending").and_then(|v| v.as_u64()).unwrap_or(0);
-        if pending == 0 {
-            return;
-        }
-        for _ in 0..12 {
-            // Recording started in the meantime: Stop will finish the work.
-            if scanning_now(&app) {
-                break;
-            }
-            match run_sessionize(&app, true).await {
-                Some(result) => {
-                    let progressed = result.get("summarized").and_then(|v| v.as_u64()).unwrap_or(0) > 0;
-                    let _ = app.emit("sessions-updated", &result);
-                    if !progressed {
-                        break;
-                    }
-                }
-                None => break,
-            }
-        }
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -970,7 +701,7 @@ fn ai_backend_seen() -> &'static Mutex<AiBackendSeen> {
     SEEN.get_or_init(|| Mutex::new(AiBackendSeen::default()))
 }
 
-fn note_ai_backend(result: &serde_json::Value) {
+pub(crate) fn note_ai_backend(result: &serde_json::Value) {
     let mut seen = ai_backend_seen().lock().unwrap();
     if let Some(used) = result.get("aiBackend").and_then(|v| v.as_str()) {
         seen.used = Some(used.to_string());
@@ -993,7 +724,7 @@ fn preferred_ai_backend() -> String {
         .unwrap_or_else(|| "gpu".to_string())
 }
 
-/// Every CLI this process starts inherits the choice.
+/// The backend inherits the choice when it starts.
 pub(crate) fn apply_ai_backend_env() {
     std::env::set_var("GLINT_LITERT_BACKEND", preferred_ai_backend());
 }
@@ -1009,8 +740,8 @@ pub fn glint_ai_backend() -> serde_json::Value {
     })
 }
 
-/// Choose GPU or CPU for the local AI. Saved, applied to every later model
-/// load, and the answer process restarts on its next question.
+/// Choose GPU or CPU for the local AI. Saved, and the backend loads the
+/// model on the new processor for its next request.
 #[tauri::command]
 pub async fn glint_set_ai_backend(app: AppHandle, backend: String) -> Result<serde_json::Value, String> {
     if backend != "gpu" && backend != "cpu" {
@@ -1033,36 +764,23 @@ pub async fn glint_set_ai_backend(app: AppHandle, backend: String) -> Result<ser
         let mut seen = ai_backend_seen().lock().unwrap();
         *seen = AiBackendSeen::default();
     }
-    // The answer process holds a model loaded on the old processor.
-    let server: State<AskServer> = app.state();
-    *server.process.lock().await = None;
+    // The backend holds a model loaded on the old processor.
+    call(&app, serde_json::json!({ "op": "ai-backend", "backend": backend })).await?;
     Ok(glint_ai_backend())
 }
 
-fn manual_scan_args(app: &AppHandle, root: &std::path::Path) -> Result<(PathBuf, Vec<String>), String> {
-    let cli = crate::bridge::sidecar_path(app)?;
-    let mut args = vec!["manual-scan".to_string()];
-    args.extend(crate::bridge::db_args(app, root));
-    args.extend(crate::bridge::host_args());
-    Ok((cli, args))
-}
-
-/// One look, through the capture worker. Pause abandons the wait at once;
-/// the worker finishes that look on its own and its late reply is skipped.
-/// If the worker cannot run at all, falls back to a one-off process.
-async fn run_manual_scan(
-    app: &AppHandle,
-    generation: u64,
-) -> Option<serde_json::Value> {
+/// One look, through the backend. Pause abandons the wait at once; the
+/// backend finishes that look on its own and its late reply is dropped.
+async fn run_manual_scan(app: &AppHandle, generation: u64) -> Option<serde_json::Value> {
     let started = std::time::Instant::now();
     let reply = {
         let runtime: State<ScanRuntime> = app.state();
         let mut cancel = runtime.cancel.subscribe();
         tokio::select! {
-            reply = crate::scan_server::request(
+            reply = crate::backend::request(
                 app,
                 serde_json::json!({ "op": "scan" }),
-                crate::scan_server::SCAN_TIMEOUT,
+                crate::backend::SCAN_TIMEOUT,
             ) => Some(reply),
             _ = cancel.changed() => None,
         }
@@ -1073,93 +791,12 @@ async fn run_manual_scan(
     match reply? {
         Ok(outcome) => {
             note_look(started.elapsed().as_millis() as u64);
-            crate::bridge::record_spawn("scan-serve", started.elapsed().as_millis(), 0, None);
+            crate::bridge::record_spawn("scan", started.elapsed().as_millis(), 0, None);
             Some(outcome)
         }
-        Err(_) => run_manual_scan_oneshot(app, generation).await,
+        // A look that failed is not the end of recording: the next one tries again.
+        Err(error) => Some(serde_json::json!({ "kind": 5, "detail": error })),
     }
-}
-
-/// The original path: a new process for one look. Kept as the fallback.
-async fn run_manual_scan_oneshot(
-    app: &AppHandle,
-    generation: u64,
-) -> Option<serde_json::Value> {
-    let root = crate::bridge::data_root().ok()?;
-    let (cli, args) = manual_scan_args(app, &root).ok()?;
-
-    // No model lock: captures never run the model, so they must not wait
-    // behind summaries being written in the background.
-    let started = std::time::Instant::now();
-    let child = tokio::process::Command::new(&cli)
-        .args(&args)
-        .creation_flags(crate::bridge::CREATE_NO_WINDOW)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .ok()?;
-
-    // Park the in-flight child in the shared slot — but only if this
-    // generation is still current (a newer start may have taken over).
-    // The lock scope ends before any await so the future stays Send.
-    let mut slot = Some(child);
-    let parked = {
-        let runtime: State<ScanRuntime> = app.state();
-        let mut state = runtime.state.lock().unwrap();
-        if state.scanning && state.generation == generation {
-            state.child = slot.take();
-            true
-        } else {
-            false
-        }
-    };
-    if !parked {
-        if let Some(mut child) = slot {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-        }
-        return None;
-    }
-
-    // Await the scan, killing in-flight capture/inference the moment this
-    // generation is cancelled (ports loop cancellation on Pause).
-    let output: Option<std::process::Output> = {
-        let runtime: State<ScanRuntime> = app.state();
-        let mut cancel = runtime.cancel.subscribe();
-        tokio::select! {
-            output = async {
-                match take_child(app) {
-                    Some(child) => child.wait_with_output().await.ok(),
-                    None => None,
-                }
-            } => output,
-            _ = cancel.changed() => {
-                if let Some(mut child) = take_child(app) {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                }
-                None
-            }
-        }
-    };
-    let output = output?;
-
-    if !is_current(app, generation) {
-        return None; // finished stale: discard, like a cancelled loop iteration
-    }
-    let parsed =
-        serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&output.stdout)).ok();
-    note_look(started.elapsed().as_millis() as u64);
-    crate::bridge::record_spawn(
-        "manual-scan",
-        started.elapsed().as_millis(),
-        output.status.code().unwrap_or(-1),
-        parsed
-            .as_ref()
-            .and_then(|v| v.get("workerStarts"))
-            .and_then(|v| v.as_i64()),
-    );
-    parsed
 }
 
 async fn scan_loop(app: AppHandle, generation: u64) {
@@ -1174,7 +811,7 @@ async fn scan_loop(app: AppHandle, generation: u64) {
     let mut foreground_changed_at: Option<Instant> = None;
     // In-app navigation inside one OS window (Discord server hop, browser
     // tab): the HWND never changes, so the foreground hook stays silent. A
-    // settled title change is treated like a switch — one timeline row plus
+    // settled title change is treated like a switch — one focus row plus
     // one capture — once it has outlasted the switch debounce.
     let mut last_title: Option<String> = None;
     let mut pending_title: Option<(String, Instant)> = None;
@@ -1184,8 +821,6 @@ async fn scan_loop(app: AppHandle, generation: u64) {
     let mut watching_until: Option<Instant> = None;
     // The last look was a game or a video.
     let mut visual_foreground = false;
-    // When recording last looked for ended activities to summarize.
-    let mut last_processing = Instant::now();
 
     loop {
         if !is_current(&app, generation) {
@@ -1229,9 +864,9 @@ async fn scan_loop(app: AppHandle, generation: u64) {
                     last_title = Some(title);
                     pending_title = None;
                     foreground_changed_at = Some(since);
-                    let marker_app = app.clone();
+                    let hop_app = app.clone();
                     let _ = tokio::task::spawn_blocking(move || {
-                        crate::timeline::record_retitle(&marker_app, foreground)
+                        crate::timeline::record_retitle(&hop_app, foreground)
                     })
                     .await;
                     if !is_current(&app, generation) {
@@ -1254,16 +889,11 @@ async fn scan_loop(app: AppHandle, generation: u64) {
         let wait_ms = match decision {
             CaptureDecision::Idle => {
                 if !away {
+                    // The user left: the backend ends the stretch in front
+                    // and describes what finished while they are gone.
                     away = true;
-                    crate::timeline::record_lifecycle(&app, "user.away");
                     let marker_app = app.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        record_marker(&marker_app, "user.away")
-                    })
-                    .await;
-                    // The user left: a good moment to summarize what ended.
-                    process_ended_soon(&app);
-                    last_processing = Instant::now();
+                    let _ = tokio::task::spawn_blocking(move || record_marker(&marker_app, "user.away")).await;
                 }
                 cadence::POLL_INTERVAL_MS
             }
@@ -1271,20 +901,13 @@ async fn scan_loop(app: AppHandle, generation: u64) {
             CaptureDecision::Capture(reason) => {
                 if away {
                     away = false;
-                    crate::timeline::record_lifecycle(&app, "user.returned");
                     let marker_app = app.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        record_marker(&marker_app, "user.returned")
-                    })
-                    .await;
+                    let _ = tokio::task::spawn_blocking(move || record_marker(&marker_app, "user.returned")).await;
                 }
                 foreground_changed_at = None;
 
                 // Live tick announcement first: the frontend logs that a scan
-                // started immediately instead of waiting out capture +
-                // inference. Deliberately no window lookup here — the only
-                // window reads are the ones inside the scan below;
-                // process/title fill in when its outcome arrives.
+                // started immediately instead of waiting out the capture.
                 let tick_id = TICK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 let started_at_ms = chrono::Utc::now().timestamp_millis();
                 let _ = app.emit(
@@ -1324,14 +947,6 @@ async fn scan_loop(app: AppHandle, generation: u64) {
             }
         };
 
-        // Summarize activities that have ended, in the background, so Stop
-        // only has the last few left. Never while a game or video is in
-        // front: the model would compete with it for the GPU.
-        if !visual_foreground && last_processing.elapsed() >= ENDED_EVERY {
-            process_ended_soon(&app);
-            last_processing = Instant::now();
-        }
-
         // Abortable wait, so a pause is noticed within one poll interval.
         {
             let runtime: State<ScanRuntime> = app.state::<ScanRuntime>();
@@ -1349,15 +964,12 @@ async fn scan_loop(app: AppHandle, generation: u64) {
 
     // Loop exit owns the final stopped state. Pause bumps the generation so
     // in-flight work dies promptly, which means a paused loop is exactly one
-    // generation behind with scanning off — without the second clause below
-    // the seal-and-summarize-on-stop path would never run. A superseded
-    // generation (newer Start, scanning back on) still skips: the new loop
-    // owns the flow and its own stop will finalize.
+    // generation behind with scanning off. A superseded generation (newer
+    // Start, scanning back on) skips: the new loop owns the flow.
     let should_finalize = {
         let runtime: State<ScanRuntime> = app.state::<ScanRuntime>();
         let mut state = runtime.state.lock().unwrap();
-        let paused =
-            state.generation == generation.wrapping_add(1) && !state.scanning;
+        let paused = state.generation == generation.wrapping_add(1) && !state.scanning;
         if state.generation == generation || paused {
             state.scanning = false;
             true
@@ -1366,35 +978,11 @@ async fn scan_loop(app: AppHandle, generation: u64) {
         }
     };
     if should_finalize {
-        // Recorded before sealing, so the final session sees the stop as the
-        // boundary it is.
+        // Stopping is one marker: the sitting ends there, and the backend
+        // describes whatever finished without being asked.
         let marker_app = app.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            record_marker(&marker_app, "run.stopped")
-        })
-        .await;
-
-        // Nothing is being captured any more, so seal and summarize
-        // everything now: one stop must drain the whole backlog, because
-        // nothing sessionizes mid-scan any more. Rounds that summarize
-        // nothing make no progress (failures stay for a later stop), which
-        // bounds the loop; each round emits so the views fill in live.
-        for _ in 0..12 {
-            match run_sessionize(&app, true).await {
-                Some(result) => {
-                    let progressed = result
-                        .get("summarized")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0)
-                        > 0;
-                    let _ = app.emit("sessions-updated", &result);
-                    if !progressed {
-                        break;
-                    }
-                }
-                None => break,
-            }
-        }
+        let _ = tokio::task::spawn_blocking(move || record_marker(&marker_app, "run.stopped")).await;
+        let _ = app.emit("sessions-updated", serde_json::json!({ "stopped": 1 }));
         let _ = app.emit(
             "scan-state",
             serde_json::json!({
@@ -1403,8 +991,6 @@ async fn scan_loop(app: AppHandle, generation: u64) {
                 "overall": overall_info("Continuous local scanning is stopped.".to_string()),
             }),
         );
-        crate::timeline::record_lifecycle(&app, "scan.stopped");
-        crate::timeline::eon_ended(&app);
         crate::refresh_tray(&app, false);
     }
 }
@@ -1414,77 +1000,49 @@ async fn scan_loop(app: AppHandle, generation: u64) {
 // ---------------------------------------------------------------------------
 
 /// Full dashboard bootstrap (ports InitializeAsync + LoadScanHistory).
-#[tauri::command(async)]
-pub fn glint_initialize(app: AppHandle) -> Result<serde_json::Value, String> {
-    let root = crate::bridge::data_root()?;
-    let db_args = crate::bridge::db_args(&app, &root);
-    let arg_refs: Vec<&str> = db_args.iter().map(|s| s.as_str()).collect();
-
-    // Compatibility (exit 2 tolerated: report still parses).
-    let compat_out = crate::bridge::run_sidecar(&app, &["compatibility"])?;
+#[tauri::command]
+pub async fn glint_initialize(app: AppHandle) -> Result<serde_json::Value, String> {
+    // Compatibility reads no store, so it runs as a one-off check
+    // (exit 2 tolerated: its report still parses).
+    let compat_out = crate::bridge::run_sidecar_async(&app, &["compatibility"]).await?;
     let (compatibility_summary, checks, core_ready) = compatibility_port(&compat_out.json);
-    let mut overall = if core_ready {
-        overall_success("This machine meets the required Phase 0 runtime checks.".to_string())
-    } else {
-        overall_error("This machine does not meet the required Phase 0 runtime checks.".to_string())
-    };
 
-    // Storage overwrites overall (last-writer-wins, like the view model).
-    let mut storage_args = vec!["storage"];
-    storage_args.extend(arg_refs.clone());
-    let storage_summary = match crate::bridge::run_sidecar(&app, &storage_args) {
+    let storage_summary = match call(&app, serde_json::json!({ "op": "storage" })).await {
         Ok(out) => {
-            let events = out.json.get("eventCount").and_then(|v| v.as_i64()).unwrap_or(0);
-            let summary = storage_port(
-                out.json.get("database").unwrap_or(&serde_json::Value::Null),
-                events,
-            );
-            overall = overall_success(
-                "Encrypted storage initialized without plaintext fallback.".to_string(),
-            );
-            summary
+            let events = out.get("eventCount").and_then(|v| v.as_i64()).unwrap_or(0);
+            storage_port(out.get("database").unwrap_or(&serde_json::Value::Null), events)
         }
-        Err(error) => {
-            let summary = format!("Storage failed: {error}");
-            overall = overall_error(summary.clone());
-            summary
-        }
+        Err(error) => format!("Storage failed: {error}"),
     };
 
     // Runtime status for the model line.
     let (model_summary, runtime_ready, model_path) =
-        match crate::bridge::run_sidecar(&app, &["runtime-status"]) {
+        match call(&app, serde_json::json!({ "op": "runtime-status" })).await {
             Ok(out) => {
-                let (summary, ready) = runtime_port(&out.json);
-                let path = out
-                    .json
-                    .get("modelPath")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+                let (summary, ready) = runtime_port(&out);
+                let path = out.get("modelPath").and_then(|v| v.as_str()).map(|s| s.to_string());
                 (summary, ready, path)
             }
             Err(error) => (format!("Gemma runtime check failed: {error}"), false, None),
         };
 
-    // Privacy probe overwrites overall last.
-    let (foreground_summary, probe_overall) = match crate::bridge::run_sidecar(&app, &["probe"]) {
+    // The banner shows the privacy probe, the last check (as the view model did).
+    let (foreground_summary, overall) = match call(&app, serde_json::json!({ "op": "probe" })).await {
         Ok(out) => foreground_port(
-            out.json.get("window").filter(|v| !v.is_null()),
-            out.json.get("decision").unwrap_or(&serde_json::Value::Null),
+            out.get("window").filter(|v| !v.is_null()),
+            out.get("decision").unwrap_or(&serde_json::Value::Null),
         ),
         Err(error) => {
             let message = format!("Probe failed: {error}");
             (message.clone(), overall_error(message))
         }
     };
-    overall = probe_overall;
 
     // Scan history.
-    let mut history_args = vec!["manual-history", "--limit", "50"];
-    history_args.extend(arg_refs);
-    let scans = crate::bridge::run_sidecar(&app, &history_args)
+    let scans = call(&app, serde_json::json!({ "op": "history", "limit": 50 }))
+        .await
         .ok()
-        .and_then(|out| out.json.get("scans").cloned())
+        .and_then(|out| out.get("scans").cloned())
         .unwrap_or(serde_json::Value::Array(vec![]));
     let history_count = scans.as_array().map(|a| a.len()).unwrap_or(0);
 
@@ -1508,13 +1066,13 @@ pub fn glint_initialize(app: AppHandle) -> Result<serde_json::Value, String> {
 }
 
 /// Foreground privacy probe (ports ProbeAsync).
-#[tauri::command(async)]
-pub fn glint_probe(app: AppHandle) -> Result<serde_json::Value, String> {
-    match crate::bridge::run_sidecar(&app, &["probe"]) {
+#[tauri::command]
+pub async fn glint_probe(app: AppHandle) -> Result<serde_json::Value, String> {
+    match call(&app, serde_json::json!({ "op": "probe" })).await {
         Ok(out) => {
             let (foreground_summary, overall) = foreground_port(
-                out.json.get("window").filter(|v| !v.is_null()),
-                out.json.get("decision").unwrap_or(&serde_json::Value::Null),
+                out.get("window").filter(|v| !v.is_null()),
+                out.get("decision").unwrap_or(&serde_json::Value::Null),
             );
             Ok(serde_json::json!({
                 "foregroundSummary": foreground_summary,
@@ -1532,19 +1090,12 @@ pub fn glint_probe(app: AppHandle) -> Result<serde_json::Value, String> {
 }
 
 /// Encrypted storage verification (ports CheckStorageAsync).
-#[tauri::command(async)]
-pub fn glint_verify_storage(app: AppHandle) -> Result<serde_json::Value, String> {
-    let root = crate::bridge::data_root()?;
-    let db_args = crate::bridge::db_args(&app, &root);
-    let mut args = vec!["storage"];
-    args.extend(db_args.iter().map(|s| s.as_str()));
-    match crate::bridge::run_sidecar(&app, &args) {
+#[tauri::command]
+pub async fn glint_verify_storage(app: AppHandle) -> Result<serde_json::Value, String> {
+    match call(&app, serde_json::json!({ "op": "storage" })).await {
         Ok(out) => {
-            let events = out.json.get("eventCount").and_then(|v| v.as_i64()).unwrap_or(0);
-            let summary = storage_port(
-                out.json.get("database").unwrap_or(&serde_json::Value::Null),
-                events,
-            );
+            let events = out.get("eventCount").and_then(|v| v.as_i64()).unwrap_or(0);
+            let summary = storage_port(out.get("database").unwrap_or(&serde_json::Value::Null), events);
             Ok(serde_json::json!({
                 "storageSummary": summary,
                 "overall": overall_success(
@@ -1562,7 +1113,8 @@ pub fn glint_verify_storage(app: AppHandle) -> Result<serde_json::Value, String>
     }
 }
 
-/// Machine compatibility check (ports CheckCompatibilityAsync).
+/// Machine compatibility check (ports CheckCompatibilityAsync). Reads no
+/// store, so it runs as a one-off check.
 #[tauri::command(async)]
 pub fn glint_check_compatibility(app: AppHandle) -> Result<serde_json::Value, String> {
     match crate::bridge::run_sidecar(&app, &["compatibility"]) {
@@ -1590,7 +1142,8 @@ pub fn glint_check_compatibility(app: AppHandle) -> Result<serde_json::Value, St
     }
 }
 
-/// Borderless-capture consent (ports RequestBorderlessAsync).
+/// Borderless-capture consent (ports RequestBorderlessAsync). A one-off
+/// Windows prompt; reads no store.
 #[tauri::command(async)]
 pub fn glint_request_borderless(app: AppHandle) -> Result<serde_json::Value, String> {
     match crate::bridge::run_sidecar(&app, &["request-borderless"]) {
@@ -1619,9 +1172,9 @@ pub fn glint_request_borderless(app: AppHandle) -> Result<serde_json::Value, Str
     }
 }
 
-/// Rich local-context search (ports SearchContextAsync via search-context).
-#[tauri::command(async)]
-pub fn glint_search(app: AppHandle, query: String) -> Result<serde_json::Value, String> {
+/// Search the page lines Glint has kept, then the windows they were in.
+#[tauri::command]
+pub async fn glint_search(app: AppHandle, query: String) -> Result<serde_json::Value, String> {
     let trimmed = query.trim().to_string();
     if trimmed.is_empty() {
         return Ok(serde_json::json!({
@@ -1629,17 +1182,9 @@ pub fn glint_search(app: AppHandle, query: String) -> Result<serde_json::Value, 
             "searchSummary": "Enter a person, application, topic, or phrase.",
         }));
     }
-    let root = crate::bridge::data_root()?;
-    let db_args = crate::bridge::db_args(&app, &root);
-    let mut args = vec!["search-context", "--query", trimmed.as_str(), "--limit", "30"];
-    args.extend(db_args.iter().map(|s| s.as_str()));
-    match crate::bridge::run_sidecar(&app, &args) {
+    match call(&app, serde_json::json!({ "op": "search", "query": trimmed, "limit": 30 })).await {
         Ok(out) => {
-            let results = out
-                .json
-                .get("results")
-                .cloned()
-                .unwrap_or(serde_json::Value::Array(vec![]));
+            let results = out.get("results").cloned().unwrap_or(serde_json::Value::Array(vec![]));
             let count = results.as_array().map(|a| a.len()).unwrap_or(0);
             Ok(serde_json::json!({
                 "results": results,
@@ -1653,16 +1198,12 @@ pub fn glint_search(app: AppHandle, query: String) -> Result<serde_json::Value, 
     }
 }
 
-/// Recent scan history (ports LoadScanHistory).
-#[tauri::command(async)]
-pub fn glint_history(app: AppHandle, limit: Option<u32>) -> Result<serde_json::Value, String> {
-    let root = crate::bridge::data_root()?;
-    let db_args = crate::bridge::db_args(&app, &root);
-    let limit_text = limit.unwrap_or(50).clamp(1, 500).to_string();
-    let mut args = vec!["manual-history", "--limit", limit_text.as_str()];
-    args.extend(db_args.iter().map(|s| s.as_str()));
-    let scans = crate::bridge::run_sidecar(&app, &args)
-        .map(|out| out.json.get("scans").cloned().unwrap_or(serde_json::Value::Array(vec![])))
+/// Recent looks, each with the session it falls in (ports LoadScanHistory).
+#[tauri::command]
+pub async fn glint_history(app: AppHandle, limit: Option<u32>) -> Result<serde_json::Value, String> {
+    let scans = call(&app, serde_json::json!({ "op": "history", "limit": limit.unwrap_or(50).clamp(1, 500) }))
+        .await
+        .map(|out| out.get("scans").cloned().unwrap_or(serde_json::Value::Array(vec![])))
         .unwrap_or(serde_json::Value::Array(vec![]));
     let count = scans.as_array().map(|a| a.len()).unwrap_or(0);
     Ok(serde_json::json!({
@@ -1673,8 +1214,8 @@ pub fn glint_history(app: AppHandle, limit: Option<u32>) -> Result<serde_json::V
 
 /// Gemma model import (ports ImportGemmaModelAsync; writes the
 /// `models/active.json` pointer the runtime locator reads).
-#[tauri::command(async)]
-pub fn glint_import_model(app: AppHandle, model_path: String) -> Result<serde_json::Value, String> {
+#[tauri::command]
+pub async fn glint_import_model(app: AppHandle, model_path: String) -> Result<serde_json::Value, String> {
     let fail = |summary: String| {
         serde_json::json!({
             "modelSummary": summary,
@@ -1715,22 +1256,21 @@ pub fn glint_import_model(app: AppHandle, model_path: String) -> Result<serde_js
         return Ok(fail(format!("Import failed: {error}")));
     }
 
-    match crate::bridge::run_sidecar(&app, &["runtime-status"]) {
+    match call(&app, serde_json::json!({ "op": "runtime-status" })).await {
         Ok(out) => {
-            let (model_summary, ready) = runtime_port(&out.json);
+            let (model_summary, ready) = runtime_port(&out);
             // Auto-wire python/worker now that a model is selected.
             let runtime = crate::runtime::ensure_runtime(&app);
             let overall = if ready {
                 overall_success(format!(
                     "Imported Gemma model: {}",
-                    out.json
+                    out
                         .get("modelPath")
                         .and_then(|v| v.as_str())
                         .unwrap_or(&model_path)
                 ))
             } else {
                 let missing = out
-                    .json
                     .get("missing")
                     .and_then(|v| v.as_array())
                     .map(|items| {
@@ -1785,9 +1325,24 @@ pub async fn glint_setup_runtime(app: AppHandle) -> Result<serde_json::Value, St
     crate::runtime::setup_runtime(app).await
 }
 
-/// Start continuous scanning (ports StartScanningAsync; owns the 1 s loop).
-#[tauri::command(async)]
-pub fn glint_start_scanning(app: AppHandle) -> Result<serde_json::Value, String> {
+/// Whether the local AI runtime is installed, and what is missing if not.
+async fn runtime_ready(app: &AppHandle) -> (bool, String) {
+    match call(app, serde_json::json!({ "op": "runtime-status" })).await {
+        Ok(out) => {
+            let missing = out
+                .get("missing")
+                .and_then(|v| v.as_array())
+                .map(|items| items.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+                .unwrap_or_else(|| "unknown".to_string());
+            (runtime_port(&out).1, missing)
+        }
+        Err(_) => (false, "unknown".to_string()),
+    }
+}
+
+/// Start continuous scanning (ports StartScanningAsync; owns the loop).
+#[tauri::command]
+pub async fn glint_start_scanning(app: AppHandle) -> Result<serde_json::Value, String> {
     {
         let runtime: State<ScanRuntime> = app.state();
         if runtime.state.lock().unwrap().scanning {
@@ -1796,24 +1351,8 @@ pub fn glint_start_scanning(app: AppHandle) -> Result<serde_json::Value, String>
     }
 
     // Runtime gate (ports the Missing check).
-    let runtime_outcome = crate::bridge::run_sidecar(&app, &["runtime-status"]);
-    let runtime_ready = runtime_outcome
-        .as_ref()
-        .map(|out| runtime_port(&out.json).1)
-        .unwrap_or(false);
-    if !runtime_ready {
-        let missing = runtime_outcome
-            .ok()
-            .and_then(|out| out.json.get("missing").cloned())
-            .and_then(|v| v.as_array().cloned())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_else(|| "unknown".to_string());
+    let (ready, missing) = runtime_ready(&app).await;
+    if !ready {
         let summary = format!("Gemma runtime is not ready. Missing: {missing}.");
         return Ok(serde_json::json!({
             "scanning": false,
@@ -1823,7 +1362,8 @@ pub fn glint_start_scanning(app: AppHandle) -> Result<serde_json::Value, String>
     }
 
     // Borderless pre-request on start (ports StartScanningAsync).
-    let borderless_allowed = crate::bridge::run_sidecar(&app, &["request-borderless"])
+    let borderless_allowed = crate::bridge::run_sidecar_async(&app, &["request-borderless"])
+        .await
         .ok()
         .and_then(|out| out.json.get("allowed").and_then(|v| v.as_bool()))
         .unwrap_or(false);
@@ -1838,29 +1378,22 @@ pub fn glint_start_scanning(app: AppHandle) -> Result<serde_json::Value, String>
     let generation = {
         let runtime: State<ScanRuntime> = app.state();
         let mut state = runtime.state.lock().unwrap();
+        if state.scanning {
+            return Ok(serde_json::json!({ "scanning": true }));
+        }
         state.scanning = true;
         state.generation = state.generation.wrapping_add(1);
         let generation = state.generation;
         runtime.cancel.send(generation).ok();
         generation
     };
+    // The start marker first, so the backend logs window switches from here.
+    let marker_app = app.clone();
+    let _ = tokio::task::spawn_blocking(move || record_marker(&marker_app, "run.started")).await;
     let task_app = app.clone();
     tauri::async_runtime::spawn(async move {
         scan_loop(task_app, generation).await;
     });
-    let heartbeat_app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        heartbeat_loop(heartbeat_app, generation).await;
-    });
-    // EON + lifecycle markers: the run and its recording state are now
-    // first-class timeline rows, not just banner text.
-    crate::timeline::eon_started(&app);
-    crate::timeline::record_lifecycle(&app, "scan.started");
-    // On its own thread: the worker request blocks, and this command may run
-    // on the async runtime. It also starts the capture worker ahead of the
-    // first look.
-    let marker_app = app.clone();
-    std::thread::spawn(move || record_marker(&marker_app, "run.started"));
     crate::refresh_tray(&app, true);
 
     Ok(serde_json::json!({
@@ -1873,7 +1406,7 @@ pub fn glint_start_scanning(app: AppHandle) -> Result<serde_json::Value, String>
     }))
 }
 
-/// Pause continuous scanning (ports PauseScanningAsync; kills in-flight work).
+/// Pause continuous scanning (ports PauseScanningAsync; abandons the look in flight).
 #[tauri::command]
 pub async fn glint_pause_scanning(app: AppHandle) -> Result<serde_json::Value, String> {
     let became_idle = {
@@ -1892,8 +1425,7 @@ pub async fn glint_pause_scanning(app: AppHandle) -> Result<serde_json::Value, S
     if !became_idle {
         return Ok(serde_json::json!({ "scanning": false }));
     }
-    // The in-flight scan observes the generation bump and kills its own
-    // capture/inference work (see run_manual_scan).
+    // The loop sees the generation change, writes the stop and finishes.
     crate::refresh_tray(&app, false);
     Ok(serde_json::json!({
         "scanning": false,
@@ -1911,13 +1443,8 @@ pub fn glint_scan_state(app: AppHandle) -> Result<serde_json::Value, String> {
 /// Single capture of the current window (ports CaptureCurrentWindowAsync).
 #[tauri::command]
 pub async fn glint_capture_once(app: AppHandle) -> Result<serde_json::Value, String> {
-    let ready = crate::bridge::run_sidecar_async(&app, &["runtime-status"])
-        .await
-        .ok()
-        .map(|out| runtime_port(&out.json).1)
-        .unwrap_or(false);
+    let (ready, missing) = runtime_ready(&app).await;
     if !ready {
-        let missing = "unknown".to_string();
         let summary = format!("Gemma runtime is not ready. Missing: {missing}.");
         return Ok(serde_json::json!({
             "kind": -1,
@@ -1929,32 +1456,7 @@ pub async fn glint_capture_once(app: AppHandle) -> Result<serde_json::Value, Str
             "overall": overall_error(summary),
         }));
     }
-    let root = crate::bridge::data_root()?;
-    let (cli, args) = manual_scan_args(&app, &root)?;
-    // No model lock: a capture never runs the model.
-    let started = std::time::Instant::now();
-    let output = tokio::task::spawn_blocking(move || {
-        crate::bridge::hidden_command(&cli).args(&args).output()
-    })
-    .await
-    .map_err(|error| format!("Capture task failed: {error}"))?
-    .map_err(|error| format!("Capture failed to launch: {error}"))?;
-    crate::bridge::record_spawn(
-        "manual-scan",
-        started.elapsed().as_millis(),
-        output.status.code().unwrap_or(-1),
-        None,
-    );
-    let outcome: serde_json::Value =
-        serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
-            .map_err(|_| {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                if stderr.is_empty() {
-                    "Capture produced no JSON output.".to_string()
-                } else {
-                    stderr
-                }
-            })?;
+    let outcome = crate::backend::request(&app, serde_json::json!({ "op": "scan" }), crate::backend::SCAN_TIMEOUT).await?;
     // Broadcast so every window (dashboard, command bar invocations)
     // applies the outcome like the scan loop does.
     let payload = outcome_payload(&outcome, None);
@@ -1977,15 +1479,12 @@ pub fn glint_show_main(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Ask: the user's question goes to the long-lived answer process
-/// (`ask-serve`), which reads their activities, works out the period and the
-/// kind of activity, writes summaries from the facts, uses the local model
-/// for everything else, and checks the model's answer against the log.
-///
-/// The process keeps the model loaded between questions, so only the first
-/// one pays for loading it. Questions and history travel over its stdin,
-/// never on a command line. `thread_id` threads the conversation: recent
-/// turns go with the question, and the question and answer are stored.
+/// Ask: the question goes to the backend, which reads the activities on
+/// demand, works out the period and the kind of activity, writes summaries
+/// from the facts, uses the local model for everything else, and checks the
+/// model's answer against the log. With a thread, the recent turns go with
+/// the question and both question and answer are kept. The model stays
+/// loaded between questions, shared with the summaries.
 #[tauri::command]
 pub async fn glint_ask(
     app: AppHandle,
@@ -1998,231 +1497,18 @@ pub async fn glint_ask(
     if question.is_empty() {
         return Err("Type a question or a message.".to_string());
     }
-    let thread_id = thread_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(str::to_string);
-
-    // Previous turns first, then the question is stored, so a crash during
-    // the answer still leaves a truthful thread.
-    let history = match &thread_id {
-        Some(id) => load_thread_turns(&app, id).await,
-        None => Vec::new(),
-    };
-    if let Some(id) = &thread_id {
-        append_chat(&app, id, "user", &question, None, None).await;
-    }
-
-    let request = serde_json::json!({
-        "question": question,
-        "scope": scope,
-        "day": day.filter(|d| !d.trim().is_empty()),
-        "history": history,
-    });
-
-    // One model at a time: the answer process shares the machine with the
-    // sessionizer's summaries.
-    let model_state: State<ScanRuntime> = app.state();
-    let _model = model_state.model_lock.lock().await;
-    let reply = ask_server_request(&app, &request).await;
-    drop(_model);
-
-    match reply {
-        Ok(answer) => {
-            if let Some(id) = &thread_id {
-                let text = answer.get("answer").and_then(|v| v.as_str()).unwrap_or("");
-                let citations = answer
-                    .get("citations")
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "[]".to_string());
-                let scoped = answer
-                    .get("scopedCount")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize);
-                append_chat(&app, id, "agent", text, Some(citations), scoped).await;
-            }
-            Ok(answer)
-        }
-        Err(error) => {
-            if let Some(id) = &thread_id {
-                append_chat(&app, id, "error", &error, None, None).await;
-            }
-            Err(error)
-        }
-    }
-}
-
-/// The running answer process, if any.
-#[derive(Default)]
-pub struct AskServer {
-    process: tokio::sync::Mutex<Option<AskProcess>>,
-}
-
-struct AskProcess {
-    child: tokio::process::Child,
-    stdin: tokio::process::ChildStdin,
-    stdout: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
-}
-
-fn spawn_ask_server(app: &AppHandle) -> Result<AskProcess, String> {
-    use tokio::io::AsyncBufReadExt;
-    let root = crate::bridge::data_root()?;
-    let cli = crate::bridge::sidecar_path(app)?;
-    let mut args = vec!["ask-serve".to_string()];
-    args.extend(crate::bridge::db_args(app, &root));
-    let mut child = tokio::process::Command::new(&cli)
-        .args(&args)
-        .creation_flags(crate::bridge::CREATE_NO_WINDOW)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| format!("Could not start the answer process: {error}"))?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "The answer process has no input.".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "The answer process has no output.".to_string())?;
-    Ok(AskProcess {
-        child,
-        stdin,
-        stdout: tokio::io::BufReader::new(stdout).lines(),
-    })
-}
-
-/// Sends one request and waits for its answer. A process that has exited
-/// (idle shutdown, crash) is replaced once, transparently.
-async fn ask_server_request(
-    app: &AppHandle,
-    request: &serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    use tokio::io::AsyncWriteExt;
-    let server: State<AskServer> = app.state();
-    let mut guard = server.process.lock().await;
-    let line = format!("{request}\n");
-    for _ in 0..2 {
-        if guard.is_none() {
-            *guard = Some(spawn_ask_server(app)?);
-        }
-        let process = guard.as_mut().expect("just set");
-        let sent = async {
-            process.stdin.write_all(line.as_bytes()).await?;
-            process.stdin.flush().await
-        }
-        .await;
-        if sent.is_ok() {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(300),
-                process.stdout.next_line(),
-            )
-            .await
-            {
-                Ok(Ok(Some(reply))) => return parse_ask_reply(&reply),
-                Ok(_) => {}
-                Err(_) => {
-                    if let Some(mut stuck) = guard.take() {
-                        let _ = stuck.child.kill().await;
-                    }
-                    return Err("The local model took too long to answer. Try again.".to_string());
-                }
-            }
-        }
-        // The process is gone: clear it and start a fresh one.
-        if let Some(mut dead) = guard.take() {
-            let _ = dead.child.kill().await;
-        }
-    }
-    Err("The answer process stopped unexpectedly. Try again.".to_string())
-}
-
-/// One line from the answer process: an answer, or an error to show.
-fn parse_ask_reply(line: &str) -> Result<serde_json::Value, String> {
-    let value: serde_json::Value = serde_json::from_str(line)
-        .map_err(|_| "The answer process returned something unreadable.".to_string())?;
-    match value.get("error").and_then(|v| v.as_str()) {
-        Some(error) => Err(error.to_string()),
-        None => Ok(value),
-    }
-}
-
-/// The last turns of a thread, oldest first, as the answer process takes
-/// them. Best effort: any failure means no history.
-async fn load_thread_turns(app: &AppHandle, thread_id: &str) -> Vec<serde_json::Value> {
-    let Ok(root) = crate::bridge::data_root() else {
-        return Vec::new();
-    };
-    let mut args = vec![
-        "chat-thread".to_string(),
-        "--id".to_string(),
-        thread_id.to_string(),
-        "--limit".to_string(),
-        "200".to_string(),
-    ];
-    args.extend(crate::bridge::db_args(app, &root));
-    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let messages = crate::bridge::run_sidecar_async(app, &refs)
-        .await
-        .ok()
-        .and_then(|out| out.json.get("messages").cloned())
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default();
-    recent_turns(&messages, 8)
-}
-
-/// User and agent turns only, newest `keep`, oldest first. Pure for tests.
-fn recent_turns(messages: &[serde_json::Value], keep: usize) -> Vec<serde_json::Value> {
-    let turns: Vec<serde_json::Value> = messages
-        .iter()
-        .filter_map(|message| {
-            let role = message.get("role").and_then(|v| v.as_str())?;
-            let text = message.get("text").and_then(|v| v.as_str())?.trim();
-            (matches!(role, "user" | "agent") && !text.is_empty())
-                .then(|| serde_json::json!({ "role": role, "text": text }))
-        })
-        .collect();
-    let skip = turns.len().saturating_sub(keep);
-    turns.into_iter().skip(skip).collect()
-}
-
-/// Best-effort chat persistence: failures are swallowed so a store hiccup
-/// can never fail an answer.
-async fn append_chat(
-    app: &AppHandle,
-    thread_id: &str,
-    role: &str,
-    text: &str,
-    citations_json: Option<String>,
-    scoped: Option<usize>,
-) {
-    let root = match crate::bridge::data_root() {
-        Ok(root) => root,
-        Err(_) => return,
-    };
-    let mut args = vec![
-        "chat-append".to_string(),
-        "--thread".to_string(),
-        thread_id.to_string(),
-        "--role".to_string(),
-        role.to_string(),
-        "--text".to_string(),
-        text.to_string(),
-    ];
-    if let Some(citations) = citations_json {
-        args.push("--citations".to_string());
-        args.push(citations);
-    }
-    if let Some(scoped) = scoped {
-        args.push("--scoped".to_string());
-        args.push(scoped.to_string());
-    }
-    args.extend(crate::bridge::db_args(app, &root));
-    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let _ = crate::bridge::run_sidecar_async(app, &refs).await;
+    crate::backend::request(
+        &app,
+        serde_json::json!({
+            "op": "ask",
+            "question": question,
+            "scope": scope,
+            "day": day.filter(|d| !d.trim().is_empty()),
+            "threadId": thread_id.filter(|id| !id.trim().is_empty()),
+        }),
+        crate::backend::ASK_TIMEOUT,
+    )
+    .await
 }
 
 /// Global shortcut registration state (never silent on conflict: the
@@ -2249,55 +1535,29 @@ pub fn glint_shortcut_status(app: AppHandle) -> Result<serde_json::Value, String
     Ok(serde_json::Value::Array(items))
 }
 
-/// Timeline fast-lane read: sealed day file for `date` (YYYY-MM-DD,
-/// default today) → hook-exact + heartbeat rows, oldest first.
-#[tauri::command(async)]
-pub fn glint_timeline(app: AppHandle, date: Option<String>) -> Result<serde_json::Value, String> {
+/// The focus log for one local day (YYYY-MM-DD, default today), oldest
+/// first, with the recording's starts and stops between the switches.
+#[tauri::command]
+pub async fn glint_timeline(app: AppHandle, date: Option<String>) -> Result<serde_json::Value, String> {
+    use chrono::{Local, NaiveDate, TimeZone};
     let day = date
         .filter(|d| !d.trim().is_empty())
         .unwrap_or_else(crate::timeline::local_day);
-    let events = crate::timeline::load_day(&app, &day)?;
+    let date = NaiveDate::parse_from_str(&day, "%Y-%m-%d").map_err(|_| format!("Not a day: {day}"))?;
+    let local_ms = |date: NaiveDate| -> Result<i64, String> {
+        Local
+            .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("midnight"))
+            .earliest()
+            .map(|at| at.timestamp_millis())
+            .ok_or_else(|| format!("No local midnight on {date}"))
+    };
+    let from = local_ms(date)?;
+    let to = local_ms(date.succ_opt().ok_or("Day out of range")?)?;
+    let out = call(&app, serde_json::json!({ "op": "timeline", "from": from, "to": to })).await?;
     Ok(serde_json::json!({
         "date": day,
-        "events": events,
-        "eons": crate::timeline::load_eons(&app),
+        "events": out.get("events").cloned().unwrap_or(serde_json::Value::Array(vec![])),
+        "eons": out.get("eons").cloned().unwrap_or(serde_json::Value::Array(vec![])),
         "droppedHooks": crate::timeline::dropped_count(),
     }))
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::{parse_ask_reply, recent_turns};
-
-    fn message(role: &str, text: &str) -> serde_json::Value {
-        serde_json::json!({ "role": role, "text": text })
-    }
-
-    #[test]
-    fn history_keeps_the_newest_user_and_agent_turns_in_order() {
-        let messages = vec![
-            message("user", "one"),
-            message("agent", "two"),
-            message("error", "worker was busy"),
-            message("user", "  "),
-            message("user", "three"),
-            message("agent", "four"),
-        ];
-        let turns = recent_turns(&messages, 3);
-        let texts: Vec<&str> = turns.iter().map(|t| t["text"].as_str().unwrap()).collect();
-        assert_eq!(texts, ["two", "three", "four"]);
-        assert!(recent_turns(&[], 8).is_empty());
-    }
-
-    #[test]
-    fn answer_process_errors_reach_the_user() {
-        assert_eq!(
-            parse_ask_reply(r#"{"error":"InvalidDataException: Empty request."}"#),
-            Err("InvalidDataException: Empty request.".to_string())
-        );
-        let ok = parse_ask_reply(r#"{"answer":"You watched Episode 3 [1].","citations":[]}"#).unwrap();
-        assert_eq!(ok["answer"], "You watched Episode 3 [1].");
-        assert!(parse_ask_reply("not json").is_err());
-    }
 }

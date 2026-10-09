@@ -81,26 +81,6 @@ public sealed record RedactionResult(
     public int Total => Counts.Values.Sum();
 }
 
-public enum PipelineOutcomeKind
-{
-    Suppressed,
-    DroppedSecretFrame,
-    Deduplicated,
-    Stored,
-    Failed
-}
-
-public sealed record PipelineOutcome(
-    PipelineOutcomeKind Kind,
-    string Detail,
-    string? EventId = null,
-    SuppressReason? SuppressReason = null,
-    int UiAutomationCharacters = 0,
-    int OcrCharacters = 0,
-    int Redactions = 0,
-    TimeSpan? CaptureElapsed = null,
-    TimeSpan? OcrElapsed = null);
-
 public sealed record OcrCaptureResult(
     string Text,
     int Width,
@@ -142,13 +122,3 @@ public sealed record StorageDiagnostics(
     string DatabasePath);
 
 public sealed record VectorSearchResult(long RowId, double Distance);
-
-public sealed record RawCaptureEvent(
-    string Id,
-    long TimestampMilliseconds,
-    string ProcessName,
-    string? ExecutablePath,
-    string WindowTitle,
-    string ContentHash,
-    string Text,
-    int Redactions);

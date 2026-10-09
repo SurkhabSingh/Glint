@@ -3,32 +3,20 @@ using System.Text;
 namespace Glint.Phase0.Core;
 
 /// <summary>
-/// Decides what a look added, by comparing its lines with everything already
-/// stored for the same page since its last full copy.
+/// Decides what a look added, by comparing its lines with the lines the same
+/// page already holds. A page's lines are stored once each, so there is no
+/// full copy to refresh and no list of differences to put back together.
 /// </summary>
 /// <remarks>
-/// This replaces an exact hash of the whole text compared with the single
-/// previous capture of any window. That treated a price tick, a clock, or one
-/// OCR misread as a brand new screen, so a live page was saved in full on
-/// every tick; and it compared a page with whichever window came before, so
-/// alt-tabbing back and forth stored the same page again and again.
-///
 /// Lines are compared after tidying: numbers become "#", common OCR
 /// confusions inside numbers are folded, case and spacing are evened out.
 /// "AAPL 187.42 ▲0.3%" and "AAPL 187.51 ▲0.4%" are then the same line, so a
 /// ticking value is not a change, while a genuinely new line ("Order filled",
-/// a new message, the reply being typed) is.
+/// a new message, the reply being typed) is. The tidied form is only the key
+/// lines are compared by; the line itself is stored as it was read.
 /// </remarks>
 public static class ChangeMeter
 {
-    /// Below this share of lines already known, the screen counts as a
-    /// different one and gets a full copy.
-    public const double NewScreenBelow = 0.6;
-
-    /// A full copy at least this often while a page keeps changing, so the
-    /// stored picture of it never drifts far from what was on screen.
-    public const long KeyframeEveryMilliseconds = 300_000;
-
     /// Lines shorter than this after tidying are layout debris ("|", "x", "#").
     private const int MinimumLineLength = 3;
 
@@ -151,80 +139,54 @@ public static class ChangeMeter
     private static int Letters(IEnumerable<string> lines) =>
         lines.Sum(line => line.Count(char.IsLetter));
 
-    public static HashSet<string> Basis(IEnumerable<string> storedTexts)
-    {
-        var basis = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var text in storedTexts)
-        {
-            foreach (var (_, key) in Lines(text))
-            {
-                basis.Add(key);
-            }
-        }
-
-        return basis;
-    }
-
-    /// <param name="text">This look's redacted text.</param>
-    /// <param name="basis">Tidied lines already stored for this page since its last full copy; empty if none.</param>
-    /// <param name="sinceKeyframeMilliseconds">Time since the page's last full copy, or null if it has none.</param>
+    /// <param name="lines">This look's lines (<see cref="PageLines.Of"/> of its redacted text).</param>
+    /// <param name="known">Keys of those lines the page already holds.</param>
     public static ChangeVerdict Compare(
-        string text,
-        IReadOnlySet<string> basis,
-        long? sinceKeyframeMilliseconds)
+        IReadOnlyList<PageLine> lines,
+        IReadOnlySet<string> known)
     {
-        ArgumentNullException.ThrowIfNull(text);
-        ArgumentNullException.ThrowIfNull(basis);
-        var lines = Lines(text);
-        if (lines.Count == 0 || Letters(lines.Select(line => line.Raw)) < MinimumNewLetters)
+        ArgumentNullException.ThrowIfNull(lines);
+        ArgumentNullException.ThrowIfNull(known);
+        if (lines.Count == 0 || Letters(lines.Select(line => line.Text)) < MinimumNewLetters)
         {
             return new(ChangeVerdictKind.Same, 1, []);
         }
 
-        if (basis.Count == 0 || sinceKeyframeMilliseconds is null)
-        {
-            return new(ChangeVerdictKind.Keyframe, 0, lines.Select(line => line.Raw).ToList());
-        }
-
-        var known = 0;
-        var fresh = new List<string>();
-        foreach (var (raw, key) in lines)
-        {
-            if (basis.Contains(key))
-            {
-                known++;
-            }
-            else
-            {
-                fresh.Add(raw);
-            }
-        }
-
-        var similarity = (double)known / lines.Count;
-        var typed = fresh.Any(line => line.StartsWith(InputPrefix, StringComparison.Ordinal));
-        if (fresh.Count == 0 || (!typed && Letters(fresh) < MinimumNewLetters))
+        var fresh = lines.Where(line => !known.Contains(line.Key)).ToList();
+        var similarity = (double)(lines.Count - fresh.Count) / lines.Count;
+        var typed = fresh.Any(line => line.Typed);
+        if (fresh.Count == 0 || (!typed && Letters(fresh.Select(line => line.Text)) < MinimumNewLetters))
         {
             return new(ChangeVerdictKind.Same, similarity, []);
         }
 
-        if (similarity < NewScreenBelow || sinceKeyframeMilliseconds >= KeyframeEveryMilliseconds)
-        {
-            return new(ChangeVerdictKind.Keyframe, similarity, lines.Select(line => line.Raw).ToList());
-        }
-
-        return new(ChangeVerdictKind.Delta, similarity, fresh);
+        return new(ChangeVerdictKind.New, similarity, fresh);
     }
+}
+
+/// The lines of a text, as a page stores them.
+public static class PageLines
+{
+    public static IReadOnlyList<PageLine> Of(string text) =>
+        ChangeMeter.Lines(text)
+            .Select(line => new PageLine(
+                line.Key,
+                line.Raw,
+                line.Raw.StartsWith(ChangeMeter.InputPrefix, StringComparison.Ordinal)))
+            .ToList();
 }
 
 public enum ChangeVerdictKind
 {
+    /// Nothing worth keeping that the page does not already hold.
     Same,
-    Delta,
-    Keyframe
+
+    /// Lines the page did not hold yet.
+    New
 }
 
-/// <param name="Lines">For a keyframe, every line; for a delta, only the new ones.</param>
+/// <param name="Lines">The lines the page did not hold yet; empty when nothing changed.</param>
 public sealed record ChangeVerdict(
     ChangeVerdictKind Kind,
     double Similarity,
-    IReadOnlyList<string> Lines);
+    IReadOnlyList<PageLine> Lines);

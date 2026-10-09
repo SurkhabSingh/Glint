@@ -33,6 +33,18 @@ pub const POLL_INTERVAL_MS: u64 = 500;
 /// On battery every interval doubles.
 pub const BATTERY_MULTIPLIER: u64 = 2;
 
+/// A look waits for this much stillness in the keyboard and mouse. Reading a
+/// window goes through its accessibility interface, which Chromium-based apps
+/// (Steam, Discord, VS Code) answer on the same thread that scrolls and
+/// paints: a look in the middle of a scroll or a drag is felt as a hitch.
+/// Typing and scrolling both pause often, so a look still lands within a
+/// moment of the work.
+pub const INPUT_SETTLE_MS: u64 = 1_200;
+
+/// A gesture that never pauses (a long scroll, a game held down) still gets
+/// its look this long after it became due.
+pub const LONGEST_DEFER_MS: u64 = 15_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CaptureSignals {
     /// Milliseconds since the last keyboard or mouse input.
@@ -98,6 +110,9 @@ pub fn decide(signals: CaptureSignals) -> CaptureDecision {
     // A switch wins over the interval, once it has settled.
     if let Some(since_change) = signals.since_foreground_change_ms {
         if since_change >= SWITCH_DEBOUNCE_MS {
+            if let Some(wait) = settle(signals.idle_ms, since_change - SWITCH_DEBOUNCE_MS) {
+                return CaptureDecision::Wait(wait);
+            }
             return CaptureDecision::Capture(CaptureReason::WindowSwitch);
         }
 
@@ -118,10 +133,22 @@ pub fn decide(signals: CaptureSignals) -> CaptureDecision {
     };
 
     if since_last_scan >= interval {
+        if let Some(wait) = settle(signals.idle_ms, since_last_scan - interval) {
+            return CaptureDecision::Wait(wait);
+        }
         return CaptureDecision::Capture(reason);
     }
 
     CaptureDecision::Wait((interval - since_last_scan).min(POLL_INTERVAL_MS))
+}
+
+/// How long a due look should still wait for the user's input to pause, or
+/// `None` to look now: input is still, or the look is overdue.
+fn settle(idle_ms: u64, overdue_ms: u64) -> Option<u64> {
+    if idle_ms >= INPUT_SETTLE_MS || overdue_ms >= LONGEST_DEFER_MS {
+        return None;
+    }
+    Some((INPUT_SETTLE_MS - idle_ms).clamp(50, POLL_INTERVAL_MS))
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +233,7 @@ mod tests {
 
         let switched = CaptureSignals {
             since_foreground_change_ms: Some(SWITCH_DEBOUNCE_MS),
+            idle_ms: INPUT_SETTLE_MS,
             ..playing
         };
         assert_eq!(
@@ -272,6 +300,7 @@ mod tests {
     fn a_settled_window_switch_captures() {
         let decision = decide(CaptureSignals {
             since_foreground_change_ms: Some(SWITCH_DEBOUNCE_MS),
+            idle_ms: INPUT_SETTLE_MS,
             ..signals()
         });
 
@@ -295,14 +324,42 @@ mod tests {
     }
 
     #[test]
-    fn typing_keeps_the_fast_cadence() {
+    fn typing_keeps_the_fast_cadence_at_its_pauses() {
         let decision = decide(CaptureSignals {
-            idle_ms: 100,
+            idle_ms: INPUT_SETTLE_MS,
             since_last_scan_ms: Some(ACTIVE_INTERVAL_MS),
             ..signals()
         });
 
         assert_eq!(decision, CaptureDecision::Capture(CaptureReason::Active));
+    }
+
+    #[test]
+    fn a_look_never_lands_in_the_middle_of_a_scroll() {
+        // Input 100 ms ago: wait for the pause, a little at a time.
+        let scrolling = CaptureSignals {
+            idle_ms: 100,
+            since_last_scan_ms: Some(ACTIVE_INTERVAL_MS),
+            ..signals()
+        };
+        match decide(scrolling) {
+            CaptureDecision::Wait(ms) => assert!(ms > 0 && ms <= POLL_INTERVAL_MS),
+            other => panic!("expected a wait, got {other:?}"),
+        }
+
+        // The same for a fresh window switch.
+        let switched = CaptureSignals {
+            since_foreground_change_ms: Some(SWITCH_DEBOUNCE_MS),
+            ..scrolling
+        };
+        assert!(matches!(decide(switched), CaptureDecision::Wait(_)));
+
+        // A scroll that never pauses still gets its look, late.
+        let endless = CaptureSignals {
+            since_last_scan_ms: Some(ACTIVE_INTERVAL_MS + LONGEST_DEFER_MS),
+            ..scrolling
+        };
+        assert_eq!(decide(endless), CaptureDecision::Capture(CaptureReason::Active));
     }
 
     #[test]
@@ -328,7 +385,7 @@ mod tests {
     #[test]
     fn battery_doubles_every_interval() {
         let typing_on_battery = CaptureSignals {
-            idle_ms: 100,
+            idle_ms: INPUT_SETTLE_MS,
             since_last_scan_ms: Some(ACTIVE_INTERVAL_MS),
             on_battery: true,
             ..signals()

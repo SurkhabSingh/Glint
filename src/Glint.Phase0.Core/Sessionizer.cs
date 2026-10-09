@@ -31,6 +31,9 @@ public sealed record ActivityMarker(long TimestampMilliseconds, string Kind, str
         "system.shutdown", "app.closed"
     };
 
+    /// Stopping the recording ends the sitting outright, however short the gap after it.
+    public bool EndsTheSitting => Kind == "run.stopped";
+
     /// Marks that end a stretch of work, as opposed to resuming one: the user
     /// left, locked the PC, it slept or shut down, or recording stopped.
     public bool EndsAStretch =>
@@ -40,13 +43,15 @@ public sealed record ActivityMarker(long TimestampMilliseconds, string Kind, str
     public bool ClosesApp => Kind == "app.closed" && !string.IsNullOrWhiteSpace(Detail);
 }
 
-/// A group of captures that belongs together, before it is written.
+/// A group of captures that belongs together.
 public sealed record SessionDraft(
     long StartedAtMilliseconds,
     long EndedAtMilliseconds,
     string ProcessName,
     string WindowTitle,
-    IReadOnlyList<string> ScanIds);
+    IReadOnlyList<string> ScanIds,
+    // The newest group, quiet for less than the quiet tail: probably still growing.
+    bool StillOpen = false);
 
 /// <summary>
 /// Groups captures into activity sessions in a batch, after the fact.
@@ -104,11 +109,20 @@ public static class Sessionizer
     public const long QuietTailMilliseconds = 200_000;
 
     /// <summary>
-    /// Groups captures into sealable sessions. Input need not be sorted.
-    /// A group is only returned once it is finished; anything still in
-    /// progress is left for a later pass.
+    /// Groups captures into finished sessions. Input need not be sorted.
+    /// The newest group is left out while it may still be growing.
     /// </summary>
     public static IReadOnlyList<SessionDraft> Cluster(
+        IReadOnlyList<CaptureRow> captures,
+        long nowMilliseconds,
+        IReadOnlyList<ActivityMarker>? markers = null) =>
+        Group(captures, nowMilliseconds, markers).Where(draft => !draft.StillOpen).ToList();
+
+    /// <summary>
+    /// Groups captures into sessions, the one still in progress included and
+    /// flagged <see cref="SessionDraft.StillOpen"/>. Input need not be sorted.
+    /// </summary>
+    public static IReadOnlyList<SessionDraft> Group(
         IReadOnlyList<CaptureRow> captures,
         long nowMilliseconds,
         IReadOnlyList<ActivityMarker>? markers = null)
@@ -124,6 +138,12 @@ public static class Sessionizer
             .Select(marker => marker.TimestampMilliseconds)
             .OrderBy(timestamp => timestamp)
             .ToList();
+        // Stopping the recording ends the sitting outright, however soon the
+        // next one starts.
+        var stops = (markers ?? [])
+            .Where(marker => marker.EndsTheSitting)
+            .Select(marker => marker.TimestampMilliseconds)
+            .ToList();
 
         var ordered = captures
             .OrderBy(capture => capture.CapturedAtMilliseconds)
@@ -137,9 +157,7 @@ public static class Sessionizer
         {
             var previous = current.Max(row => row.EndMilliseconds);
             var gap = capture.CapturedAtMilliseconds - previous;
-            var explained = gap >= IdleGapMilliseconds
-                && breaks.Any(at => at > previous && at < capture.CapturedAtMilliseconds);
-            if (explained || gap > UnexplainedGapMilliseconds)
+            if (IsBoundary(previous, capture.CapturedAtMilliseconds, breaks, stops))
             {
                 groups.Add(current);
                 current = [capture];
@@ -154,21 +172,40 @@ public static class Sessionizer
         // The last group is the only one that can still be growing: every
         // earlier group is already followed by a boundary.
         var last = groups[^1];
-        if (nowMilliseconds - last.Max(row => row.EndMilliseconds) < QuietTailMilliseconds)
-        {
-            groups.RemoveAt(groups.Count - 1);
-        }
-
-        return groups.Select(ToDraft).ToList();
+        var lastOpen = nowMilliseconds - last.Max(row => row.EndMilliseconds) < QuietTailMilliseconds;
+        return groups
+            .Select((group, index) => ToDraft(group, lastOpen && index == groups.Count - 1))
+            .ToList();
     }
 
-    private static SessionDraft ToDraft(List<CaptureRow> group) =>
+    /// <summary>
+    /// Whether a sitting ends between a capture last seen at
+    /// <paramref name="previousEnd"/> and one starting at <paramref name="nextStart"/>.
+    /// </summary>
+    public static bool IsBoundary(long previousEnd, long nextStart, IReadOnlyList<ActivityMarker> markers) =>
+        IsBoundary(
+            previousEnd,
+            nextStart,
+            markers.Where(marker => marker.EndsAStretch).Select(marker => marker.TimestampMilliseconds).ToList(),
+            markers.Where(marker => marker.EndsTheSitting).Select(marker => marker.TimestampMilliseconds).ToList());
+
+    private static bool IsBoundary(long previousEnd, long nextStart, IReadOnlyList<long> breaks, IReadOnlyList<long> stops)
+    {
+        var gap = nextStart - previousEnd;
+        var explained = gap >= IdleGapMilliseconds
+            && breaks.Any(at => at > previousEnd && at < nextStart);
+        var stopped = stops.Any(at => at >= previousEnd && at <= nextStart);
+        return explained || stopped || gap > UnexplainedGapMilliseconds;
+    }
+
+    private static SessionDraft ToDraft(List<CaptureRow> group, bool stillOpen) =>
         new(
             group[0].CapturedAtMilliseconds,
             group.Max(row => row.EndMilliseconds),
             Dominant(group.Select(capture => capture.ProcessName)),
             Dominant(group.Select(capture => capture.WindowTitle)),
-            group.Select(capture => capture.Id).ToList());
+            group.Select(capture => capture.Id).ToList(),
+            stillOpen);
 
     /// Most frequent value, breaking ties toward the one seen last so a
     /// session that drifted is named after where it ended up.

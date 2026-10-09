@@ -15,7 +15,7 @@ public sealed class BrowserAndLanguageCaptureTests
     [Fact]
     public void CombineTextPreservesJapaneseAndDeduplicatesAcrossSources()
     {
-        var combined = CapturePipeline.CombineText(
+        var combined = ScreenText.Combine(
             "第一章 勇者の記録\n明日の会議は午後十時です。",
             "第一章 勇者の記録\r\n追加の画面テキスト");
 

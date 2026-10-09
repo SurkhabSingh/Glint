@@ -1,11 +1,9 @@
-//! Bridge between the Tauri frontend and the Phase 0 .NET backend.
-//!
-//! The old WinUI frontend (`Glint.Phase0.App/MainViewModel.cs`) called
-//! `Glint.Phase0.Core` directly. The Tauri backend cannot link managed code,
-//! so every Core operation goes through the `Glint.Phase0.Cli` sidecar: one
-//! short-lived process per action, a single camelCase JSON document on stdout,
-//! diagnostics/errors on stderr. Exit codes: 0 = ok, 1 = failure,
-//! 2 = `compatibility --require-ready` not ready.
+//! Locating and starting `Glint.Phase0.Cli`. The backend (`backend.rs`) is
+//! the long-running `serve` process; the few checks that read no store
+//! (compatibility, borderless-capture consent) still run as one-off
+//! processes here: a single camelCase JSON document on stdout, errors on
+//! stderr. Exit codes: 0 = ok, 1 = failure, 2 = `compatibility
+//! --require-ready` not ready.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;

@@ -10,9 +10,6 @@ the Phase 0 results are accepted.
 
 ## Implemented
 
-- Native C#/.NET 9 WinUI 3 diagnostic shell using Windows App SDK 1.8.6.
-- Self-contained x64 MSIX and portable ZIP; neither requires a separate .NET
-  or Windows App SDK installation.
 - Foreground HWND, process, title, bounds, elevation, desktop, minimized, and
   display-affinity inspection.
 - Fail-closed privacy gate before UI Automation text or pixel capture.
@@ -20,8 +17,8 @@ the Phase 0 results are accepted.
 - One-frame Windows Graphics Capture through `CreateForWindow(HWND)`.
 - Hardware D3D11 capture with automatic WARP software fallback.
 - In-memory Windows OCR with no image encoding or image files.
-- Built-in machine compatibility report in WinUI and the CLI.
-- User-controlled continuous OCR scanning from the WinUI app.
+- Built-in machine compatibility report in the app and the CLI.
+- User-controlled continuous scanning from the app.
 - Local Gemma 4 E2B label and summary generation after privacy filtering and
   deterministic redaction.
 - Conversation-aware 16,000-character context selection that retains metadata
@@ -48,59 +45,71 @@ the Phase 0 results are accepted.
 
 | Project | Responsibility |
 |---|---|
-| `Glint.Phase0.Core` | Capture, privacy, redaction, encrypted storage, model lifecycle, LiteRT worker client |
-| `Glint.Phase0.Cli` | Repeatable host diagnostics and smoke tests |
-| `Glint.Phase0.App` | Minimal native WinUI 3 diagnostic UI and MSIX definition |
+| `src/tauri.interface` | The app: Tauri host (window, tray, hotkeys, when to look, Windows events) and the React screens |
+| `Glint.Phase0.Cli` | `serve`, the backend the app runs; plus diagnostics that read no store |
+| `Glint.Phase0.Core` | Capture, privacy, redaction, encrypted storage, activities, summaries, Ask, LiteRT worker client |
 | `Glint.Phase0.EmbeddingProbe` | Windows ML and Nomic embedding feasibility proof |
-| `Glint.Phase0.Tests` | Privacy, pipeline, redaction, storage, and model lifecycle tests |
+| `Glint.Phase0.Tests` | Privacy, capture, grouping, storage, upgrade and model lifecycle tests |
+
+## How it fits together (Phase 1)
+
+- **One backend process.** The app starts `Glint.Phase0.Cli serve` once and
+  sends it every request over one pipe (JSON lines, many in flight at once):
+  looks, window switches, markers, every screen's reads, Ask. It is the only
+  process that opens the store, through one writing connection; reads use
+  their own read-only connections. The local model is loaded once and shared
+  by Ask and summaries.
+- **Store what happened, work out the rest.** The store keeps looks, the
+  distinct lines each page showed (`content_chunks`, searchable), the focus
+  log (every stretch a window spent in front), markers (start, stop, away,
+  lock, app closed), and what cannot be worked out again: AI summaries, app
+  modes, and the user's verdicts on tasks and sessions. Sessions and
+  activities are computed when a screen asks for them (`ActivityView`), so
+  nothing is sealed, rebuilt or recovered.
+- **Summaries while you are away.** Finished reading activities are
+  described by the local model when the user is idle (or not recording),
+  never while a game or video is in front, and each description is kept.
+- **Upgrading** an older store (version 15) first copies it to
+  `memory.db.pre-v15.bak`, moves its text into page lines and its summaries
+  and verdicts into the tables that keep them, and imports the old
+  `timeline\` files into the focus log (the folder is kept as
+  `timeline.imported`).
 
 ## Quick Verification
 
 ```powershell
-.\scripts\verify-phase0.ps1
+.\scriptserify-phase0.ps1
 ```
 
 To skip the multi-gigabyte inference checks:
 
 ```powershell
-.\scripts\verify-phase0.ps1 -SkipInference
+.\scriptserify-phase0.ps1 -SkipInference
 ```
 
-## Run Without Installing
-
-Build the portable package, then extract and run it:
+## Run
 
 ```powershell
-.\scripts\build-portable.ps1
+dotnet build .\src\Glint.Phase0.Cli -c Release
+cd .\src\tauri.interface
+npm install
+npm run tauri dev
 ```
 
-```text
-artifacts\portable\Glint.Phase0.App-win-x64.zip
-```
+The continuous scanner auto-discovers the verified Phase 0 Python runtime and
+model from this workspace. Production distribution still requires the owned
+C++ LiteRT worker.
 
-The portable build needs no certificate trust, .NET runtime, Windows App SDK,
-Python, or model files for compatibility and storage diagnostics. The continuous
-Gemma scanner currently auto-discovers the verified Phase 0 Python
-runtime and model from this workspace. Production distribution still requires
-the owned C++ LiteRT worker.
-
-## Manual Scan
-
-1. Run `Glint.Phase0.App.exe`.
-2. Click **Start scanning**.
-3. Switch to the target window. Glint scans changed visible content
-   sequentially and keeps running.
-4. Timestamped labels and summaries appear under **Scanned activity**.
-5. Return to Glint and click **Pause scanning** to stop. Any in-flight capture
-   or Gemma request is cancelled.
-
-The history is encrypted under `%LOCALAPPDATA%\Glint\Phase0`.
+The history is encrypted under `%LOCALAPPDATA%\Glint\Phase0`. The backend can
+also be driven by hand, e.g.
+`'{"id":1,"op":"activities","limit":20}' | Glint.Phase0.Cli serve`.
 
 Machine and live-target reports:
 
 ```powershell
 .\scripts\export-compatibility-report.ps1
-.\scripts\run-live-compatibility.ps1
+.\scripts
+un-live-compatibility.ps1
 ```
 
 ## Privacy Invariants

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   categoryLabel,
@@ -251,17 +251,24 @@ function TimelinePage() {
       .catch(() => {
         if (!cancelled) setSessions([]);
       });
-    glintActivities(1000)
-      .then((response) => {
-        if (!cancelled) setActivities(response.activities ?? []);
-      })
-      .catch(() => {
-        if (!cancelled) setActivities([]);
-      });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  // Activities are worked out for the day being looked at (and the hour
+  // around midnight on either side), so any day of history can be opened.
+  const loadActivities = useCallback(() => {
+    const from = new Date(`${dayStr}T00:00:00`).getTime() - 3600000;
+    const to = new Date(`${addDaysStr(dayStr, 1)}T00:00:00`).getTime() + 3600000;
+    return glintActivities(5000, from, to)
+      .then((response) => setActivities(response.activities ?? []))
+      .catch(() => setActivities([]));
+  }, [dayStr]);
+
+  useEffect(() => {
+    loadActivities();
+  }, [loadActivities]);
 
   const loadedDays = useRef({});
 
@@ -311,32 +318,21 @@ function TimelinePage() {
     return () => unlisten?.();
   }, []);
 
-  // Session seals and summaries land here: sealing stamps sessionIds onto
-  // scans (ungrouped cards join their cluster) and summaries fill the
-  // session headers. Without this the timeline never shows a summarisation
-  // until the page is remounted. All-quiet ticks (every count zero, the
-  // common case while a stretch is still open) skip the refetch so an idle
-  // scan loop does not respawn two sidecars every 2 s for nothing.
+  // Summaries written while the user was away, a stop, or a mode
+  // correction: the backend only sends this when something changed.
   useEffect(() => {
     let unlisten;
-    listen("sessions-updated", (event) => {
-      const r = event.payload ?? {};
-      const changed = ["sealed", "summarized", "failed", "minor", "decided", "threaded", "activities", "sessionsBuilt"].some(
-        (k) => Number(r[k] ?? 0) > 0
-      );
-      if (event.payload && !changed) return;
+    listen("sessions-updated", () => {
       glintHistory(500)
         .then((response) => setHistory(response.history ?? []))
         .catch(() => {});
       glintSessions(50)
         .then((response) => setSessions(response.sessions ?? []))
         .catch(() => {});
-      glintActivities(1000)
-        .then((response) => setActivities(response.activities ?? []))
-        .catch(() => {});
+      loadActivities();
     }).then((fn) => (unlisten = fn));
     return () => unlisten?.();
-  }, []);
+  }, [loadActivities]);
 
   const dayStart = new Date(`${dayStr}T00:00:00`).getTime();
   const dayEnd = new Date(`${addDaysStr(dayStr, 1)}T00:00:00`).getTime();
@@ -384,26 +380,21 @@ function TimelinePage() {
   }
 
   /**
-   * Folds repeats into one row: the 30 s "still here" heartbeats for the
-   * same app, and consecutive captures of the same thing. Rows are newest
-   * first; a folded row keeps the newest time and shows the span it covers.
+   * Folds consecutive captures of the same thing into one row. Rows are
+   * newest first; a folded row keeps the newest time and shows the span it
+   * covers.
    */
   function collapseRows(rows) {
     const out = [];
     for (const row of rows) {
       const last = out[out.length - 1];
-      const sameHeartbeat =
-        last &&
-        row.kind === "heartbeat" &&
-        last.kind === "heartbeat" &&
-        last.process === row.process;
       const sameCapture =
         last &&
         row.kind === "scan.completed" &&
         last.kind === "scan.completed" &&
         last.label === row.label &&
         last.process === row.process;
-      if (sameHeartbeat || sameCapture) {
+      if (sameCapture) {
         last.count = (last.count ?? 1) + 1;
         last.since_ms = row.ts_wall_ms;
         continue;
@@ -415,44 +406,11 @@ function TimelinePage() {
 
   function foldedNote(row) {
     if (!row.count || row.count < 2) return "";
-    return ` · ${row.count} ${row.kind === "heartbeat" ? "checks" : "looks"} since ${formatClock(row.since_ms).replace(/\.\d{3}/, "")}`;
+    return ` · ${row.count} looks since ${formatClock(row.since_ms).replace(/\.\d{3}/, "")}`;
   }
 
   function renderEventRow(row, index, list) {
     const key = row.id ?? `${row.ts_wall_ms}-${index}`;
-    if (row.kind === "eon.started") {
-      return (
-        <div className="tl-row eon" key={key}>
-          <span className="tl-time" title={formatTimestamp(row.ts_wall_ms)}>
-            {formatClock(row.ts_wall_ms)}
-          </span>
-          <span className="tl-dot" />
-          <span className="tl-text">
-            <strong>EON began — recording started</strong>
-          </span>
-        </div>
-      );
-    }
-    if (row.kind === "eon.ended") {
-      const started = list.find(
-        (r) => r.kind === "eon.started" && r.eon_id === row.eon_id
-      );
-      const span =
-        started?.ts_wall_ms != null
-          ? ` · ran ${dwellText(row.ts_wall_ms - started.ts_wall_ms).slice(3)}`
-          : "";
-      return (
-        <div className="tl-row eon ended" key={key}>
-          <span className="tl-time" title={formatTimestamp(row.ts_wall_ms)}>
-            {formatClock(row.ts_wall_ms)}
-          </span>
-          <span className="tl-dot idle" />
-          <span className="tl-text">
-            <strong>EON ended{span}</strong>
-          </span>
-        </div>
-      );
-    }
     if (row.kind === "scan.started") {
       return (
         <div className="tl-row" key={key}>
@@ -483,18 +441,6 @@ function TimelinePage() {
         </div>
       );
     }
-    if (row.kind === "heartbeat") {
-      return (
-        <div className="tl-row dim" key={key}>
-          <span className="tl-time">{formatClock(row.ts_wall_ms)}</span>
-          <span className="tl-dot idle" />
-          <span className="tl-text">
-            Still in {row.process ?? "unknown"}
-            {foldedNote(row)}
-          </span>
-        </div>
-      );
-    }
     if (row.kind === "scan.completed") {
       return (
         <div className="tl-row scan" key={key}>
@@ -511,9 +457,9 @@ function TimelinePage() {
         </div>
       );
     }
-    const newer = index > 0 ? list[index - 1] : null;
-    const dwell =
-      newer?.ts_wall_ms != null ? newer.ts_wall_ms - row.ts_wall_ms : null;
+    // How long the window stayed in front: until the next switch, a stop
+    // or the user leaving. Still in front while it has no end.
+    const dwell = row.ended_ms != null ? row.ended_ms - row.ts_wall_ms : null;
     return (
       <div className="tl-row" key={key}>
         <span className="tl-time" title={formatTimestamp(row.ts_wall_ms)}>
@@ -542,16 +488,10 @@ function TimelinePage() {
     (r) => r.kind === "window.focused"
   ).length;
 
-  const MARKER_KINDS = [
-    "eon.started",
-    "eon.ended",
-    "scan.started",
-    "scan.paused",
-    "scan.stopped",
-  ];
+  const MARKER_KINDS = ["scan.started", "scan.stopped"];
 
-  // Summarized day view with EON/scan lifecycle markers interleaved at
-  // their timestamps, so a run's begin/end reads as structure, not text.
+  // Summarized day view with the recording's starts and stops interleaved
+  // at their timestamps, so a run's begin/end reads as structure, not text.
   function renderDayList() {
     const markers = (eventsCache[dayStr] ?? [])
       .filter((r) => MARKER_KINDS.includes(r.kind))

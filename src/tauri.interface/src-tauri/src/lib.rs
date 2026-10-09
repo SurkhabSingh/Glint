@@ -5,15 +5,16 @@
 //! - floating command-bar window toggled by Ctrl+Alt+G,
 //! - system-tray icon with the same context menu as `TrayHotkeyHost`,
 //! - hide-to-tray on close/minimize.
-//! All capture/privacy/storage/model work is bridged to `Glint.Phase0.Core`
-//! through the `Glint.Phase0.Cli` sidecar (see `bridge.rs` / `glint.rs`).
+//! All capture/privacy/storage/model work happens in one backend process,
+//! `Glint.Phase0.Cli serve` (see `backend.rs`); this host decides when to
+//! look, listens to Windows, and runs the window, tray and hotkeys.
 
+mod backend;
 mod bridge;
 mod cadence;
 mod glass;
 mod glint;
 mod runtime;
-mod scan_server;
 mod system_events;
 mod timeline;
 
@@ -143,7 +144,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 fn start_scan_action(app: &AppHandle) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        match glint::glint_start_scanning(handle.clone()) {
+        match glint::glint_start_scanning(handle.clone()).await {
             Ok(state) => {
                 let _ = handle.emit("scan-state", &state);
             }
@@ -248,8 +249,7 @@ fn register_scan_hotkeys(app: &tauri::AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .manage(glint::ScanRuntime::default())
-        .manage(glint::AskServer::default())
-        .manage(scan_server::ScanServer::default())
+        .manage(backend::Backend::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(shortcut_plugin())
@@ -264,10 +264,12 @@ pub fn run() {
             register_scan_hotkeys(app.handle());
             // Windows' own end signals: lock, sleep, shutdown, closed apps.
             system_events::start(app.handle().clone());
-            // A recording a crash or shutdown left open is closed and summarized.
-            glint::recover_on_startup(app.handle());
-            // Pin LiteRT python/worker env for every sidecar this process
-            // spawns (tray and hotkey actions included).
+            // The backend starts with Glint: a store upgrade, a recording a
+            // crash left open and summaries still owed are handled before the
+            // first screen asks.
+            backend::start(app.handle());
+            // Pin LiteRT python/worker env for the backend and the one-off
+            // checks this process starts.
             let _ = glint::glint_ensure_runtime(app.handle().clone());
             // Frosted glass behind both frameless windows (default theme
             // tint; the frontend re-tints on every theme change).

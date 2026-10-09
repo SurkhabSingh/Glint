@@ -15,12 +15,11 @@ try {
     dotnet run --project .\src\Glint.Phase0.Cli --configuration Debug --no-build -- `
         compatibility --require-ready
     if ($LASTEXITCODE -ne 0) { throw "Compatibility verification failed." }
-    dotnet run --project .\src\Glint.Phase0.Cli --configuration Debug --no-build -- `
-        storage --data-dir .phase0-verification
-    if ($LASTEXITCODE -ne 0) { throw "Storage verification failed." }
-    dotnet run --project .\src\Glint.Phase0.Cli --configuration Debug --no-build -- `
-        vector-smoke --data-dir .phase0-verification
-    if ($LASTEXITCODE -ne 0) { throw "Vector verification failed." }
+    # The store is only ever opened by the backend: ask it, over its pipe.
+    $storage = '{"id":1,"op":"storage"}' | dotnet run --project .\src\Glint.Phase0.Cli --configuration Debug --no-build -- `
+        serve --data-dir .phase0-verification | Out-String
+    if ($LASTEXITCODE -ne 0 -or $storage -notmatch '"sqlCipherVersion":"[^"]+"') { throw "Storage verification failed." }
+    if ($storage -notmatch '"sqliteVecAvailable":true') { throw "sqlite-vec is not available to the store." }
 
     if (-not $SkipInference) {
         $python = ".\tools\litert\.venv\Scripts\python.exe"

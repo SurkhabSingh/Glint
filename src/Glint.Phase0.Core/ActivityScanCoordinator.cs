@@ -12,10 +12,9 @@ namespace Glint.Phase0.Core;
 /// <remarks>
 /// Privacy order is unchanged from the original coordinator: the gate runs
 /// before any text or pixel is read, secret frames are dropped whole, and
-/// text is redacted before anything is compared or stored. What changed is
-/// what gets stored. A look that adds nothing extends the previous record
-/// instead of saving a copy, and a look that adds a few lines saves only
-/// those lines.
+/// text is redacted before anything is compared or stored. A look that adds
+/// nothing extends the previous record instead of saving a copy, and a page's
+/// lines are stored once each, however many looks see them.
 /// </remarks>
 public sealed class ActivityScanCoordinator
 {
@@ -184,7 +183,7 @@ public sealed class ActivityScanCoordinator
         }
 
         var latest = _store.GetLatestFacet();
-        var continuing = Continues(latest, identity.Key, now);
+        var continuing = Continues(latest, identity.Key, now, _store.GetLatestBreakMilliseconds());
         if (continuing)
         {
             _store.TouchScan(latest!.Id, now);
@@ -238,7 +237,7 @@ public sealed class ActivityScanCoordinator
         CancellationToken cancellationToken)
     {
         var latest = _store.GetLatestFacet();
-        var continuing = Continues(latest, identity.Key, now);
+        var continuing = Continues(latest, identity.Key, now, _store.GetLatestBreakMilliseconds());
         var state = _store.GetPageState(identity.Key);
         var moving = state?.Moving ?? true;
         if (!continuing || state is null || now - state.SignatureAtMilliseconds >= VisualLookEveryMilliseconds)
@@ -253,7 +252,7 @@ public sealed class ActivityScanCoordinator
                     frame.Signature,
                     diff.LiveCounts,
                     now,
-                    state?.KeyframeAtMilliseconds ?? 0,
+                    state?.TextReadAtMilliseconds ?? 0,
                     now,
                     moving));
             }
@@ -308,7 +307,7 @@ public sealed class ActivityScanCoordinator
             eventKind = "saved";
         }
 
-        var continuing = Continues(latest, identity.Key, now)
+        var continuing = Continues(latest, identity.Key, now, _store.GetLatestBreakMilliseconds())
             && latest!.Unsaved == identity.Unsaved
             && (eventKind is null || latest.EventKind == eventKind);
         if (continuing)
@@ -353,7 +352,7 @@ public sealed class ActivityScanCoordinator
         }
 
         var latest = _store.GetLatestFacet();
-        var continuing = Continues(latest, identity.Key, now)
+        var continuing = Continues(latest, identity.Key, now, _store.GetLatestBreakMilliseconds())
             && (eventKind is null || latest!.EventKind == eventKind);
         if (continuing)
         {
@@ -373,8 +372,8 @@ public sealed class ActivityScanCoordinator
 
     /// <summary>
     /// Text-first work. The picture check runs before any text is read; text
-    /// is compared line by line with what this page already stored, and only
-    /// what is new gets saved.
+    /// is compared line by line with the lines this page already holds, and
+    /// only lines it did not hold are saved.
     /// </summary>
     private async Task<ManualScanOutcome> LookReadAsync(
         ForegroundWindowInfo window,
@@ -385,7 +384,7 @@ public sealed class ActivityScanCoordinator
         CancellationToken cancellationToken)
     {
         var latest = _store.GetLatestFacet();
-        var continuing = Continues(latest, identity.Key, now);
+        var continuing = Continues(latest, identity.Key, now, _store.GetLatestBreakMilliseconds());
         var state = _store.GetPageState(identity.Key);
         var userCaused = _inputIdle() <= UserInput.CausedWithinMilliseconds;
 
@@ -404,18 +403,14 @@ public sealed class ActivityScanCoordinator
             FrameDiff? diff = frame is null
                 ? null
                 : FrameSignature.Compare(state?.Signature, frame.Signature, state?.LiveCounts);
-            // Only what this recording stored counts as known: after a stop the
-            // session is sealed, and the next look starts from a fresh copy so
-            // the new session has text of its own.
-            var basisTexts = _store.GetPageBasis(identity.Key);
-            var keyframeAt = basisTexts.Count > 0 ? state?.KeyframeAtMilliseconds ?? 0 : 0;
-            void RememberPicture(long keyframe) =>
+            var textReadAt = state?.TextReadAtMilliseconds ?? 0;
+            void RememberPicture(long textRead) =>
                 _store.UpsertPageState(new PageState(
                     identity.Key,
                     frame?.Signature ?? state?.Signature,
                     diff?.LiveCounts ?? state?.LiveCounts ?? new byte[FrameSignature.CellCount],
                     frame is null ? state?.SignatureAtMilliseconds ?? 0 : now,
-                    keyframe,
+                    textRead,
                     now,
                     diff?.Moved ?? false));
 
@@ -423,18 +418,20 @@ public sealed class ActivityScanCoordinator
             // site: watched, not read.
             if (WatchDetector.Detect(window, identity.Subject, probe.IsBrowser, [], diff, null) is not null)
             {
-                RememberPicture(keyframeAt);
+                RememberPicture(textReadAt);
                 return Watched(window, app, probe, identity, latest, now, diff);
             }
 
             // Picture check: nothing moved, or only the spots this page always
             // moves (a ticker, a clock, a video) while the user did nothing.
+            // The lines read last time are still what is on screen.
             if (state is not null
                 && diff is not null
-                && keyframeAt > 0
+                && textReadAt > 0
                 && (diff.NothingMoved || (diff.OnlyLiveCells && !userCaused)))
             {
-                RememberPicture(keyframeAt);
+                _store.TouchLinesSeenAt(identity.Key, textReadAt, now);
+                RememberPicture(now);
                 return KeepPresence(window, identity, latest, continuing, now, "Picture check: nothing new on screen.");
             }
 
@@ -445,7 +442,7 @@ public sealed class ActivityScanCoordinator
             // a video being watched, even out of full screen.
             if (WatchDetector.Detect(window, identity.Subject, probe.IsBrowser, [], diff, automationText.Text) is not null)
             {
-                RememberPicture(keyframeAt);
+                RememberPicture(textReadAt);
                 return Watched(window, app, probe, identity, latest, now, diff);
             }
 
@@ -453,7 +450,7 @@ public sealed class ActivityScanCoordinator
                 ? null
                 : await frame.RecognizeAsync(probe.DocumentBounds, diff?.LiveCells(), cancellationToken).ConfigureAwait(false);
             var combined = ChangeMeter.CleanText(
-                CapturePipeline.CombineText(automationText.Text, ocr?.Text ?? string.Empty));
+                ScreenText.Combine(automationText.Text, ocr?.Text ?? string.Empty));
             if (identity.Site is null)
             {
                 _resolver.Learn(app, combined.Length, window.IsFullscreen, now);
@@ -468,13 +465,13 @@ public sealed class ActivityScanCoordinator
 
             if (combined.Length == 0)
             {
-                RememberPicture(keyframeAt);
+                RememberPicture(textReadAt);
                 return KeepPresence(window, identity, latest, continuing, now, "No readable text in the window.");
             }
 
             if (SecretSniffer.ShouldDrop(combined) is { } dropReason)
             {
-                RememberPicture(keyframeAt);
+                RememberPicture(textReadAt);
                 KeepPresence(window, identity, latest, continuing, now, string.Empty);
                 return new(
                     ManualScanOutcomeKind.DroppedSecretFrame,
@@ -483,24 +480,25 @@ public sealed class ActivityScanCoordinator
             }
 
             var redacted = _redactor.Redact(combined);
-            var verdict = ChangeMeter.Compare(
-                redacted.Text,
-                ChangeMeter.Basis(basisTexts),
-                keyframeAt > 0 && basisTexts.Count > 0 ? now - keyframeAt : null);
+            var lines = PageLines.Of(redacted.Text);
+            var keys = lines.Select(line => line.Key).ToList();
+            var known = _store.GetKnownLines(identity.Key, keys);
+            var verdict = ChangeMeter.Compare(lines, known);
+            // Every line just read is on screen now, new or not.
+            _store.TouchLines(identity.Key, known.ToList(), now);
+            RememberPicture(now);
             if (verdict.Kind == ChangeVerdictKind.Same)
             {
-                RememberPicture(keyframeAt);
                 return KeepPresence(window, identity, latest, continuing, now, "Nothing new on this page.");
             }
 
-            var change = verdict.Kind == ChangeVerdictKind.Keyframe ? CaptureChange.Keyframe : CaptureChange.Delta;
-            var text = change == CaptureChange.Keyframe ? redacted.Text : string.Join(Environment.NewLine, verdict.Lines);
-            RememberPicture(change == CaptureChange.Keyframe ? now : keyframeAt);
+            var text = string.Join(Environment.NewLine, verdict.Lines.Select(line => line.Text));
             var record = Save(
                 window,
                 identity,
                 now,
-                change,
+                CaptureChange.Delta,
+                verdict.Lines,
                 text,
                 redacted.Total,
                 automationText.Text.Length,
@@ -509,13 +507,13 @@ public sealed class ActivityScanCoordinator
                 ActivityEvidence.FindConfirmation(text) is null ? null : "confirmed");
             return new(
                 ManualScanOutcomeKind.Completed,
-                change == CaptureChange.Keyframe
-                    ? "New screen: a full copy was redacted and stored."
+                known.Count == 0
+                    ? $"New page: {verdict.Lines.Count} line{(verdict.Lines.Count == 1 ? string.Empty : "s")} redacted and stored."
                     : $"{verdict.Lines.Count} new line{(verdict.Lines.Count == 1 ? string.Empty : "s")} redacted and stored.",
                 record,
                 Mode: ActivityMode.Read,
                 ScreenMoving: diff?.Moved ?? false,
-                Change: change);
+                Change: CaptureChange.Delta);
         }
         finally
         {
@@ -538,7 +536,7 @@ public sealed class ActivityScanCoordinator
         FrameDiff? diff)
     {
         var watching = AsWatching(window, app, probe, identity, now, learnSite: false);
-        if (Continues(latest, watching.Key, now) && latest!.Mode == ActivityMode.Watch)
+        if (Continues(latest, watching.Key, now, _store.GetLatestBreakMilliseconds()) && latest!.Mode == ActivityMode.Watch)
         {
             _store.TouchScan(latest.Id, now);
         }
@@ -556,18 +554,19 @@ public sealed class ActivityScanCoordinator
     }
 
     /// <summary>
-    /// A record is extended only while it is the latest one, still open (not
-    /// sealed into a session by a stop), and recently seen. A stop, a crash
-    /// or a long absence always starts a new record, so time is never
-    /// claimed across a gap nobody saw.
+    /// A record is extended only while it is the latest one, nothing ended
+    /// the stretch since it was last seen (a stop, leaving, locking), and it
+    /// was seen recently. A stop, a crash or a long absence always starts a
+    /// new record, so time is never claimed across a gap nobody saw.
     /// </summary>
     internal static bool Continues(
         [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] ScanFacet? latest,
         string pageKey,
-        long now) =>
+        long now,
+        long latestBreakMilliseconds) =>
         latest is not null
         && latest.PageKey == pageKey
-        && latest.SessionId is null
+        && latest.LastSeenMilliseconds > latestBreakMilliseconds
         && now - latest.LastSeenMilliseconds <= ContinueWithinMilliseconds;
 
     /// Longer than the slowest look interval (a minute, two on battery) with
@@ -601,7 +600,7 @@ public sealed class ActivityScanCoordinator
     }
 
     private void SavePresence(ForegroundWindowInfo window, PageIdentity identity, long now, string? eventKind) =>
-        Save(window, identity, now, CaptureChange.Presence, null, 0, 0, null, false, eventKind);
+        Save(window, identity, now, CaptureChange.Presence, null, null, 0, 0, null, false, eventKind);
 
     private void RecordPrivatePresence(
         ForegroundWindowInfo window,
@@ -621,13 +620,14 @@ public sealed class ActivityScanCoordinator
             ActivityCategory.Other,
             false);
         var latest = _store.GetLatestFacet();
-        if (Continues(latest, privateIdentity.Key, now) && (eventKind is null || latest!.EventKind == eventKind))
+        if (Continues(latest, privateIdentity.Key, now, _store.GetLatestBreakMilliseconds())
+            && (eventKind is null || latest!.EventKind == eventKind))
         {
             _store.TouchScan(latest!.Id, now);
             return;
         }
 
-        Save(window, privateIdentity, now, CaptureChange.Presence, null, 0, 0, null, false, eventKind, storeTitle: false);
+        Save(window, privateIdentity, now, CaptureChange.Presence, null, null, 0, 0, null, false, eventKind, storeTitle: false);
     }
 
     private ManualScanRecord Save(
@@ -635,6 +635,7 @@ public sealed class ActivityScanCoordinator
         PageIdentity identity,
         long now,
         CaptureChange change,
+        IReadOnlyList<PageLine>? newLines,
         string? text,
         int redactions,
         int automationCharacters,
@@ -648,9 +649,8 @@ public sealed class ActivityScanCoordinator
             : string.Empty;
         var hashInput = text ?? $"presence|{identity.Key}|{now}|{Guid.NewGuid():N}";
         var contentHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(hashInput)));
-        var scanId = Guid.NewGuid().ToString("N");
         var record = new ManualScanRecord(
-            scanId,
+            Guid.NewGuid().ToString("N"),
             now,
             window.ProcessName,
             title,
@@ -666,6 +666,7 @@ public sealed class ActivityScanCoordinator
             ocr?.CaptureElapsed.TotalMilliseconds ?? 0,
             ocr?.OcrElapsed.TotalMilliseconds ?? 0,
             0,
+            RedactedInputText: text,
             OcrLanguage: ocr?.RecognizerLanguage,
             PageKey: identity.Key,
             AppName: identity.AppName,
@@ -679,19 +680,9 @@ public sealed class ActivityScanCoordinator
             UserCaused: userCaused,
             Unsaved: identity.Unsaved,
             DialogTitle: ActivityEvidence.DialogEventOf(window.DialogTitle) is null ? null : window.DialogTitle,
-            EventKind: eventKind);
-        var captureEvent = text is null
-            ? null
-            : new RawCaptureEvent(
-                Guid.NewGuid().ToString("N"),
-                now,
-                window.ProcessName,
-                window.ExecutablePath,
-                title,
-                contentHash,
-                text,
-                redactions);
-        _store.SaveFacetScan(captureEvent, record);
+            EventKind: eventKind,
+            ExecutablePath: window.ExecutablePath);
+        _store.SaveLook(record, newLines);
         return record;
     }
 }

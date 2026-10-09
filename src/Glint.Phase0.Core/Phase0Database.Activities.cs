@@ -1,273 +1,24 @@
 using Microsoft.Data.Sqlite;
-using System.Text.Json;
 
 namespace Glint.Phase0.Core;
 
 /// <summary>
-/// Storage for the activity model: per-look facets on captures, remembered
-/// app modes, picture-check state per page, and the activities themselves.
-/// Everything lives in the same encrypted store as the captures.
+/// Storage for the activity model: looks and the page lines they read, the
+/// focus log, remembered app modes, picture-check state per page, and what
+/// cannot be worked out again for free (summaries, the user's verdicts).
 /// </summary>
 public sealed partial class Phase0Database
 {
-    private static readonly JsonSerializerOptions ActivityJson = new(JsonSerializerDefaults.Web);
-
-    private const string SessionColumns =
-        """
-        id, started_at_ms, ended_at_ms, process_name, window_title,
-        scan_ids_json, label, summary, status, important_signals,
-        reminder_candidate, head_text, tail_text, is_minor,
-        outcome, outcome_source, outcome_at_ms, thread_id
-        """;
-
     private const string FacetColumns =
         """
         id, captured_at_ms, COALESCE(last_seen_ms, captured_at_ms), process_name,
         window_title, page_key, app_name, site, subject, phase, mode, category,
-        change_kind, unsaved, dialog_title, event_kind, user_caused,
-        (SELECT r.executable_path FROM raw_events AS r WHERE r.content_hash = manual_scans.content_hash),
-        session_id
+        change_kind, unsaved, dialog_title, event_kind, user_caused, executable_path
         """;
 
-    private const string ActivityColumns =
-        """
-        id, session_id, key, app, site, subject, mode, category, started_at_ms,
-        ended_at_ms, active_ms, segments_json, glances_json, events_json,
-        phases_json, scan_ids_json, label, summary, task, task_status,
-        task_by_user, check_state, facts_kept, facts_dropped
-        """;
-
-    private void ApplyActivityMigrations()
-    {
-        EnsureColumn("manual_scans", "page_key", "TEXT");
-        EnsureColumn("manual_scans", "app_name", "TEXT");
-        EnsureColumn("manual_scans", "site", "TEXT");
-        EnsureColumn("manual_scans", "subject", "TEXT");
-        EnsureColumn("manual_scans", "phase", "TEXT");
-        EnsureColumn("manual_scans", "mode", "TEXT");
-        EnsureColumn("manual_scans", "category", "TEXT");
-        EnsureColumn("manual_scans", "change_kind", "TEXT");
-        EnsureColumn("manual_scans", "last_seen_ms", "INTEGER");
-        EnsureColumn("manual_scans", "user_caused", "INTEGER NOT NULL DEFAULT 0");
-        EnsureColumn("manual_scans", "unsaved", "INTEGER NOT NULL DEFAULT 0");
-        EnsureColumn("manual_scans", "dialog_title", "TEXT");
-        EnsureColumn("manual_scans", "event_kind", "TEXT");
-        EnsureColumn("activity_sessions", "activities_built", "INTEGER NOT NULL DEFAULT 0");
-        Execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_manual_scans_page_key
-            ON manual_scans(page_key, captured_at_ms);
-
-            -- Every look learns its app's title noise from recent titles.
-            CREATE INDEX IF NOT EXISTS idx_manual_scans_process
-            ON manual_scans(process_name, captured_at_ms);
-
-            CREATE TABLE IF NOT EXISTS app_profiles (
-                key TEXT PRIMARY KEY,
-                display_name TEXT NOT NULL,
-                mode TEXT NOT NULL,
-                category TEXT NOT NULL,
-                source TEXT NOT NULL,
-                samples INTEGER NOT NULL DEFAULT 0,
-                sparse_samples INTEGER NOT NULL DEFAULT 0,
-                updated_at_ms INTEGER NOT NULL
-            ) STRICT;
-
-            CREATE TABLE IF NOT EXISTS page_states (
-                page_key TEXT PRIMARY KEY,
-                signature TEXT,
-                live_counts BLOB,
-                signature_at_ms INTEGER NOT NULL,
-                keyframe_at_ms INTEGER NOT NULL,
-                updated_at_ms INTEGER NOT NULL,
-                moving INTEGER NOT NULL DEFAULT 0
-            ) STRICT;
-
-            CREATE TABLE IF NOT EXISTS activities (
-                id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                key TEXT NOT NULL,
-                app TEXT NOT NULL,
-                site TEXT,
-                subject TEXT NOT NULL,
-                mode TEXT NOT NULL,
-                category TEXT NOT NULL,
-                started_at_ms INTEGER NOT NULL,
-                ended_at_ms INTEGER NOT NULL,
-                active_ms INTEGER NOT NULL,
-                segments_json TEXT NOT NULL DEFAULT '[]',
-                glances_json TEXT NOT NULL DEFAULT '[]',
-                events_json TEXT NOT NULL DEFAULT '[]',
-                phases_json TEXT NOT NULL DEFAULT '[]',
-                scan_ids_json TEXT NOT NULL DEFAULT '[]',
-                label TEXT NOT NULL,
-                summary TEXT,
-                task TEXT,
-                task_status TEXT NOT NULL DEFAULT 'None',
-                task_by_user INTEGER NOT NULL DEFAULT 0,
-                check_state TEXT NOT NULL DEFAULT 'Rule',
-                facts_kept INTEGER NOT NULL DEFAULT 0,
-                facts_dropped INTEGER NOT NULL DEFAULT 0
-            ) STRICT;
-
-            CREATE INDEX IF NOT EXISTS idx_activities_session
-            ON activities(session_id);
-
-            CREATE INDEX IF NOT EXISTS idx_activities_started
-            ON activities(started_at_ms DESC);
-
-            CREATE INDEX IF NOT EXISTS idx_activities_check
-            ON activities(check_state);
-
-            INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
-            VALUES (11, CAST(unixepoch('subsec') * 1000 AS INTEGER));
-            """);
-
-        // Version 12: sessions and activities span each record to when it
-        // was last seen, not when it started. Rebuild everything built
-        // before that once; summaries already written are kept.
-        using var version = _connection.CreateCommand();
-        version.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE version = 12);";
-        if (Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) == 0)
-        {
-            Execute(
-                """
-                UPDATE activity_sessions SET activities_built = 0 WHERE status = 'Closed';
-                INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
-                VALUES (12, CAST(unixepoch('subsec') * 1000 AS INTEGER));
-                """);
-        }
-
-        // Version 14: markers for locking, sleep, shutdown and closed apps (the
-        // old table only allowed four kinds), and summaries written while
-        // recording, for activities that ended before their session did.
-        version.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE version = 14);";
-        if (Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) == 0)
-        {
-            MigrateToVersion14();
-        }
-
-        // Version 13: emulators and games started by a launcher are games,
-        // including time recorded before they were recognized. Rebuild once.
-        version.CommandText = "SELECT EXISTS(SELECT 1 FROM schema_version WHERE version = 13);";
-        if (Convert.ToInt64(version.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) == 0)
-        {
-            Execute(
-                """
-                UPDATE activity_sessions SET activities_built = 0 WHERE status = 'Closed';
-                INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
-                VALUES (13, CAST(unixepoch('subsec') * 1000 AS INTEGER));
-                """);
-        }
-    }
-
-    /// <summary>
-    /// Version 14, done so it can never be left half applied. Several Glint
-    /// processes open the database at once (a capture, a summary pass, Ask),
-    /// so the whole change runs in one write transaction taken up front: a
-    /// second process waits, then sees the version row and does nothing.
-    /// It also repairs a store left half migrated by the first version of
-    /// this upgrade, which ran its steps one by one.
-    /// </summary>
-    private void MigrateToVersion14()
-    {
-        using var transaction = _connection.BeginTransaction(deferred: false);
-
-        void Run(string sql)
-        {
-            using var command = _connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = sql;
-            command.ExecuteNonQuery();
-        }
-
-        long Scalar(string sql)
-        {
-            using var command = _connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = sql;
-            return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
-        }
-
-        // Another process finished it while this one waited for the lock.
-        if (Scalar("SELECT EXISTS(SELECT 1 FROM schema_version WHERE version = 14);") != 0)
-        {
-            transaction.Commit();
-            return;
-        }
-
-        var hasDetail = Scalar("SELECT COUNT(*) FROM pragma_table_info('activity_markers') WHERE name = 'detail';") != 0;
-        if (!hasDetail)
-        {
-            // A copy from an interrupted attempt holds nothing the original lacks.
-            Run(
-                """
-                DROP TABLE IF EXISTS activity_markers_v14;
-                CREATE TABLE activity_markers_v14 (
-                    id INTEGER PRIMARY KEY,
-                    ts_ms INTEGER NOT NULL,
-                    kind TEXT NOT NULL,
-                    detail TEXT
-                ) STRICT;
-                INSERT INTO activity_markers_v14 (id, ts_ms, kind)
-                    SELECT id, ts_ms, kind FROM activity_markers;
-                DROP TABLE activity_markers;
-                ALTER TABLE activity_markers_v14 RENAME TO activity_markers;
-                """);
-        }
-        else
-        {
-            Run("DROP TABLE IF EXISTS activity_markers_v14;");
-        }
-
-        Run(
-            """
-            CREATE INDEX IF NOT EXISTS idx_activity_markers_ts ON activity_markers(ts_ms);
-
-            CREATE TABLE IF NOT EXISTS early_narrations (
-                activity_key TEXT NOT NULL,
-                started_at_ms INTEGER NOT NULL,
-                ended_at_ms INTEGER NOT NULL,
-                label TEXT NOT NULL,
-                summary TEXT,
-                task TEXT,
-                task_status TEXT NOT NULL,
-                check_state TEXT NOT NULL,
-                facts_kept INTEGER NOT NULL,
-                facts_dropped INTEGER NOT NULL,
-                created_at_ms INTEGER NOT NULL,
-                PRIMARY KEY (activity_key, started_at_ms)
-            ) STRICT;
-
-            UPDATE activity_sessions SET activities_built = 0 WHERE status = 'Closed';
-            INSERT OR IGNORE INTO schema_version(version, applied_at_ms)
-            VALUES (14, CAST(unixepoch('subsec') * 1000 AS INTEGER));
-            """);
-        transaction.Commit();
-    }
-
-    private void EnsureColumn(string table, string column, string definition)
-    {
-        // Table and column names come only from the constants above, never
-        // from input, so composing them into DDL is safe.
-        using var query = _connection.CreateCommand();
-        query.CommandText = $"SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name = $column);";
-        query.Parameters.AddWithValue("$column", column);
-        if (Convert.ToInt64(query.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) == 1)
-        {
-            return;
-        }
-
-        try
-        {
-            Execute($"ALTER TABLE {table} ADD COLUMN {column} {definition};");
-        }
-        catch (Microsoft.Data.Sqlite.SqliteException error)
-            when (error.Message.Contains("duplicate column", StringComparison.OrdinalIgnoreCase))
-        {
-            // Another Glint process added it between the check and the change.
-        }
-    }
+    /// The longest a single look is ever extended (a game left running all
+    /// day). Bounds the lookback when finding looks that reach into a window.
+    private const long LongestLookMilliseconds = 43_200_000;
 
     // -----------------------------------------------------------------------
     // App profiles
@@ -307,15 +58,6 @@ public sealed partial class Phase0Database
     public void UpsertAppProfile(AppProfile profile)
     {
         ArgumentNullException.ThrowIfNull(profile);
-        // An app newly recognized as a game was recorded as something else
-        // until now (or, running as administrator, as private time): rebuild
-        // once so its earlier time shows as play too.
-        var before = GetAppProfile(profile.Key);
-        if (profile.Mode == ActivityMode.Play && before?.Mode != ActivityMode.Play)
-        {
-            Execute("UPDATE activity_sessions SET activities_built = 0 WHERE status = 'Closed';");
-        }
-
         using var command = _connection.CreateCommand();
         command.CommandText =
             """
@@ -344,8 +86,8 @@ public sealed partial class Phase0Database
 
     /// <summary>
     /// The user's correction of how an app or site is treated. Absolute: the
-    /// catalog and learning never overwrite it. Sessions already built are
-    /// rebuilt so the correction shows on the timeline straight away.
+    /// catalog and learning never overwrite it. Activities are worked out when
+    /// read, so it applies to all history at once.
     /// </summary>
     public AppProfile SetAppModeByUser(string key, ActivityMode mode, ActivityCategory? category, long atMilliseconds)
     {
@@ -360,7 +102,6 @@ public sealed partial class Phase0Database
             existing?.SparseSamples ?? 0,
             atMilliseconds);
         UpsertAppProfile(profile);
-        Execute("UPDATE activity_sessions SET activities_built = 0 WHERE status = 'Closed';");
         return profile;
     }
 
@@ -384,7 +125,7 @@ public sealed partial class Phase0Database
         using var command = _connection.CreateCommand();
         command.CommandText =
             """
-            SELECT page_key, signature, live_counts, signature_at_ms, keyframe_at_ms, updated_at_ms, moving
+            SELECT page_key, signature, live_counts, signature_at_ms, text_read_at_ms, updated_at_ms, moving
             FROM page_states WHERE page_key = $key;
             """;
         command.Parameters.AddWithValue("$key", pageKey);
@@ -412,13 +153,13 @@ public sealed partial class Phase0Database
         command.CommandText =
             """
             INSERT INTO page_states
-                (page_key, signature, live_counts, signature_at_ms, keyframe_at_ms, updated_at_ms, moving)
-            VALUES ($key, $signature, $counts, $signatureAt, $keyframeAt, $updatedAt, $moving)
+                (page_key, signature, live_counts, signature_at_ms, keyframe_at_ms, text_read_at_ms, updated_at_ms, moving)
+            VALUES ($key, $signature, $counts, $signatureAt, 0, $textReadAt, $updatedAt, $moving)
             ON CONFLICT(page_key) DO UPDATE SET
                 signature = excluded.signature,
                 live_counts = excluded.live_counts,
                 signature_at_ms = excluded.signature_at_ms,
-                keyframe_at_ms = excluded.keyframe_at_ms,
+                text_read_at_ms = excluded.text_read_at_ms,
                 updated_at_ms = excluded.updated_at_ms,
                 moving = excluded.moving;
             """;
@@ -426,14 +167,14 @@ public sealed partial class Phase0Database
         command.Parameters.AddWithValue("$signature", (object?)state.Signature?.ToBase64() ?? DBNull.Value);
         command.Parameters.AddWithValue("$counts", state.LiveCounts);
         command.Parameters.AddWithValue("$signatureAt", state.SignatureAtMilliseconds);
-        command.Parameters.AddWithValue("$keyframeAt", state.KeyframeAtMilliseconds);
+        command.Parameters.AddWithValue("$textReadAt", state.TextReadAtMilliseconds);
         command.Parameters.AddWithValue("$updatedAt", state.UpdatedAtMilliseconds);
         command.Parameters.AddWithValue("$moving", state.Moving ? 1 : 0);
         command.ExecuteNonQuery();
     }
 
     // -----------------------------------------------------------------------
-    // Facets on captures
+    // Looks
     // -----------------------------------------------------------------------
 
     public ScanFacet? GetLatestFacet()
@@ -474,83 +215,10 @@ public sealed partial class Phase0Database
         return titles;
     }
 
-    public IReadOnlyList<string> GetPageBasis(string pageKey, int limit = 60)
+    public void SaveLook(ManualScanRecord look, IReadOnlyList<PageLine>? newLines = null)
     {
-        using var command = _connection.CreateCommand();
-        command.CommandText =
-            """
-            SELECT f.text
-            FROM manual_scans AS m
-            JOIN raw_events_fts AS f ON f.content_hash = m.content_hash
-            WHERE m.page_key = $key
-              AND m.session_id IS NULL
-              AND m.change_kind IN ('Keyframe', 'Delta')
-              AND m.captured_at_ms >= COALESCE((
-                    SELECT MAX(captured_at_ms) FROM manual_scans
-                    WHERE page_key = $key AND change_kind = 'Keyframe' AND session_id IS NULL), 0)
-            ORDER BY m.captured_at_ms ASC
-            LIMIT $limit;
-            """;
-        command.Parameters.AddWithValue("$key", pageKey);
-        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 500));
-        using var reader = command.ExecuteReader();
-        var texts = new List<string>();
-        while (reader.Read())
-        {
-            if (!reader.IsDBNull(0))
-            {
-                texts.Add(reader.GetString(0));
-            }
-        }
-
-        return texts;
-    }
-
-    public void SaveFacetScan(RawCaptureEvent? captureEvent, ManualScanRecord scan)
-    {
-        ArgumentNullException.ThrowIfNull(scan);
+        ArgumentNullException.ThrowIfNull(look);
         using var transaction = _connection.BeginTransaction();
-        if (captureEvent is not null)
-        {
-            int inserted;
-            using (var command = _connection.CreateCommand())
-            {
-                command.Transaction = transaction;
-                command.CommandText =
-                    """
-                    INSERT OR IGNORE INTO raw_events
-                        (id, ts_ms, process_name, executable_path, window_title,
-                         content_hash, text_length, redactions)
-                    VALUES
-                        ($id, $ts, $process, $path, $title, $hash, $length, $redactions);
-                    """;
-                command.Parameters.AddWithValue("$id", captureEvent.Id);
-                command.Parameters.AddWithValue("$ts", captureEvent.TimestampMilliseconds);
-                command.Parameters.AddWithValue("$process", captureEvent.ProcessName);
-                command.Parameters.AddWithValue("$path", (object?)captureEvent.ExecutablePath ?? DBNull.Value);
-                command.Parameters.AddWithValue("$title", captureEvent.WindowTitle);
-                command.Parameters.AddWithValue("$hash", captureEvent.ContentHash);
-                command.Parameters.AddWithValue("$length", captureEvent.Text.Length);
-                command.Parameters.AddWithValue("$redactions", captureEvent.Redactions);
-                inserted = command.ExecuteNonQuery();
-            }
-
-            if (inserted > 0)
-            {
-                using var fts = _connection.CreateCommand();
-                fts.Transaction = transaction;
-                fts.CommandText =
-                    """
-                    INSERT INTO raw_events_fts (event_id, text, content_hash)
-                    VALUES ($id, $text, $hash);
-                    """;
-                fts.Parameters.AddWithValue("$id", captureEvent.Id);
-                fts.Parameters.AddWithValue("$text", captureEvent.Text);
-                fts.Parameters.AddWithValue("$hash", captureEvent.ContentHash);
-                fts.ExecuteNonQuery();
-            }
-        }
-
         using (var command = _connection.CreateCommand())
         {
             command.Transaction = transaction;
@@ -562,43 +230,66 @@ public sealed partial class Phase0Database
                      ocr_characters, redactions, capture_ms, ocr_ms, inference_ms,
                      ocr_language, page_key, app_name, site, subject, phase, mode,
                      category, change_kind, last_seen_ms, user_caused, unsaved,
-                     dialog_title, event_kind)
+                     dialog_title, event_kind, executable_path)
                 VALUES
                     ($id, $capturedAt, $process, $title, $label, NULL,
                      $status, NULL, $hash, $model, $uia,
                      $ocr, $redactions, $captureMs, $ocrMs, 0,
                      $ocrLanguage, $pageKey, $appName, $site, $subject, $phase, $mode,
                      $category, $change, $lastSeen, $userCaused, $unsaved,
-                     $dialogTitle, $eventKind);
+                     $dialogTitle, $eventKind, $executablePath);
                 """;
-            command.Parameters.AddWithValue("$id", scan.Id);
-            command.Parameters.AddWithValue("$capturedAt", scan.CapturedAtMilliseconds);
-            command.Parameters.AddWithValue("$process", scan.ProcessName);
-            command.Parameters.AddWithValue("$title", scan.WindowTitle);
-            command.Parameters.AddWithValue("$label", (object?)scan.Label ?? DBNull.Value);
-            command.Parameters.AddWithValue("$status", scan.Status.ToString());
-            command.Parameters.AddWithValue("$hash", scan.ContentHash);
-            command.Parameters.AddWithValue("$model", scan.ModelId);
-            command.Parameters.AddWithValue("$uia", scan.UiAutomationCharacters);
-            command.Parameters.AddWithValue("$ocr", scan.OcrCharacters);
-            command.Parameters.AddWithValue("$redactions", scan.Redactions);
-            command.Parameters.AddWithValue("$captureMs", scan.CaptureMilliseconds);
-            command.Parameters.AddWithValue("$ocrMs", scan.OcrMilliseconds);
-            command.Parameters.AddWithValue("$ocrLanguage", (object?)scan.OcrLanguage ?? DBNull.Value);
-            command.Parameters.AddWithValue("$pageKey", (object?)scan.PageKey ?? DBNull.Value);
-            command.Parameters.AddWithValue("$appName", (object?)scan.AppName ?? DBNull.Value);
-            command.Parameters.AddWithValue("$site", (object?)scan.Site ?? DBNull.Value);
-            command.Parameters.AddWithValue("$subject", (object?)scan.Subject ?? DBNull.Value);
-            command.Parameters.AddWithValue("$phase", (object?)scan.Phase ?? DBNull.Value);
-            command.Parameters.AddWithValue("$mode", (object?)scan.Mode?.ToString() ?? DBNull.Value);
-            command.Parameters.AddWithValue("$category", (object?)scan.Category?.ToString() ?? DBNull.Value);
-            command.Parameters.AddWithValue("$change", (object?)scan.Change?.ToString() ?? DBNull.Value);
-            command.Parameters.AddWithValue("$lastSeen", (object?)scan.LastSeenMilliseconds ?? DBNull.Value);
-            command.Parameters.AddWithValue("$userCaused", scan.UserCaused ? 1 : 0);
-            command.Parameters.AddWithValue("$unsaved", scan.Unsaved ? 1 : 0);
-            command.Parameters.AddWithValue("$dialogTitle", (object?)scan.DialogTitle ?? DBNull.Value);
-            command.Parameters.AddWithValue("$eventKind", (object?)scan.EventKind ?? DBNull.Value);
+            command.Parameters.AddWithValue("$id", look.Id);
+            command.Parameters.AddWithValue("$capturedAt", look.CapturedAtMilliseconds);
+            command.Parameters.AddWithValue("$process", look.ProcessName);
+            command.Parameters.AddWithValue("$title", look.WindowTitle);
+            command.Parameters.AddWithValue("$label", (object?)look.Label ?? DBNull.Value);
+            command.Parameters.AddWithValue("$status", look.Status.ToString());
+            command.Parameters.AddWithValue("$hash", look.ContentHash);
+            command.Parameters.AddWithValue("$model", look.ModelId);
+            command.Parameters.AddWithValue("$uia", look.UiAutomationCharacters);
+            command.Parameters.AddWithValue("$ocr", look.OcrCharacters);
+            command.Parameters.AddWithValue("$redactions", look.Redactions);
+            command.Parameters.AddWithValue("$captureMs", look.CaptureMilliseconds);
+            command.Parameters.AddWithValue("$ocrMs", look.OcrMilliseconds);
+            command.Parameters.AddWithValue("$ocrLanguage", (object?)look.OcrLanguage ?? DBNull.Value);
+            command.Parameters.AddWithValue("$pageKey", (object?)look.PageKey ?? DBNull.Value);
+            command.Parameters.AddWithValue("$appName", (object?)look.AppName ?? DBNull.Value);
+            command.Parameters.AddWithValue("$site", (object?)look.Site ?? DBNull.Value);
+            command.Parameters.AddWithValue("$subject", (object?)look.Subject ?? DBNull.Value);
+            command.Parameters.AddWithValue("$phase", (object?)look.Phase ?? DBNull.Value);
+            command.Parameters.AddWithValue("$mode", (object?)look.Mode?.ToString() ?? DBNull.Value);
+            command.Parameters.AddWithValue("$category", (object?)look.Category?.ToString() ?? DBNull.Value);
+            command.Parameters.AddWithValue("$change", (object?)look.Change?.ToString() ?? DBNull.Value);
+            command.Parameters.AddWithValue("$lastSeen", (object?)look.LastSeenMilliseconds ?? DBNull.Value);
+            command.Parameters.AddWithValue("$userCaused", look.UserCaused ? 1 : 0);
+            command.Parameters.AddWithValue("$unsaved", look.Unsaved ? 1 : 0);
+            command.Parameters.AddWithValue("$dialogTitle", (object?)look.DialogTitle ?? DBNull.Value);
+            command.Parameters.AddWithValue("$eventKind", (object?)look.EventKind ?? DBNull.Value);
+            command.Parameters.AddWithValue("$executablePath", (object?)look.ExecutablePath ?? DBNull.Value);
             command.ExecuteNonQuery();
+        }
+
+        if (newLines is { Count: > 0 } && look.PageKey is { } pageKey)
+        {
+            foreach (var line in newLines)
+            {
+                using var insert = _connection.CreateCommand();
+                insert.Transaction = transaction;
+                insert.CommandText =
+                    """
+                    INSERT INTO content_chunks (page_key, line_key, text, first_seen_ms, last_seen_ms, scan_id, typed)
+                    VALUES ($page, $key, $text, $at, $at, $scan, $typed)
+                    ON CONFLICT(page_key, line_key) DO UPDATE SET last_seen_ms = MAX(content_chunks.last_seen_ms, excluded.last_seen_ms);
+                    """;
+                insert.Parameters.AddWithValue("$page", pageKey);
+                insert.Parameters.AddWithValue("$key", line.Key);
+                insert.Parameters.AddWithValue("$text", line.Text);
+                insert.Parameters.AddWithValue("$at", look.CapturedAtMilliseconds);
+                insert.Parameters.AddWithValue("$scan", look.Id);
+                insert.Parameters.AddWithValue("$typed", line.Typed ? 1 : 0);
+                insert.ExecuteNonQuery();
+            }
         }
 
         transaction.Commit();
@@ -618,78 +309,139 @@ public sealed partial class Phase0Database
         command.ExecuteNonQuery();
     }
 
-    public IReadOnlyList<ScanFacet> GetScanFacets(IReadOnlyList<string> scanIds)
+    public IReadOnlyList<ScanFacet> GetFacetsBetween(long fromMilliseconds, long toMilliseconds)
     {
-        ArgumentNullException.ThrowIfNull(scanIds);
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            $"""
+            SELECT {FacetColumns}
+            FROM manual_scans
+            WHERE captured_at_ms < $to
+              AND captured_at_ms >= $earliest
+              AND COALESCE(last_seen_ms, captured_at_ms) >= $from
+            ORDER BY captured_at_ms ASC, id ASC;
+            """;
+        command.Parameters.AddWithValue("$from", fromMilliseconds);
+        command.Parameters.AddWithValue("$to", toMilliseconds);
+        command.Parameters.AddWithValue("$earliest", fromMilliseconds - LongestLookMilliseconds);
+        using var reader = command.ExecuteReader();
         var facets = new List<ScanFacet>();
-        foreach (var chunk in scanIds.Chunk(400))
+        while (reader.Read())
         {
-            using var command = _connection.CreateCommand();
-            command.CommandText =
-                $"""
-                SELECT {FacetColumns}
-                FROM manual_scans
-                WHERE id IN ({BindIds(command, chunk)})
-                ORDER BY captured_at_ms ASC, id ASC;
-                """;
-            using var reader = command.ExecuteReader();
-            while (reader.Read())
-            {
-                facets.Add(ReadFacet(reader));
-            }
+            facets.Add(ReadFacet(reader));
         }
 
-        return facets.OrderBy(facet => facet.CapturedAtMilliseconds).ThenBy(facet => facet.Id, StringComparer.Ordinal).ToList();
+        return facets;
     }
 
-    public IReadOnlyList<ScanText> GetScanTexts(IReadOnlyList<string> scanIds)
+    public long? GetLastLookEndBefore(long beforeMilliseconds)
     {
-        ArgumentNullException.ThrowIfNull(scanIds);
-        var texts = new List<ScanText>();
-        foreach (var chunk in scanIds.Chunk(400))
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT MAX(COALESCE(last_seen_ms, captured_at_ms))
+            FROM manual_scans
+            WHERE captured_at_ms < $before AND captured_at_ms >= $earliest
+              AND COALESCE(last_seen_ms, captured_at_ms) < $before;
+            """;
+        command.Parameters.AddWithValue("$before", beforeMilliseconds);
+        command.Parameters.AddWithValue("$earliest", beforeMilliseconds - 7 * 86_400_000L);
+        return command.ExecuteScalar() is long value ? value : null;
+    }
+
+    /// <summary>
+    /// The newest looks, newest first, each with the page lines it was the
+    /// first to see as its text.
+    /// </summary>
+    public IReadOnlyList<ManualScanRecord> GetRecentLooks(int limit = 50)
+    {
+        if (limit is < 1 or > 500)
         {
-            using var command = _connection.CreateCommand();
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
+        var looks = new List<ManualScanRecord>();
+        using (var command = _connection.CreateCommand())
+        {
             command.CommandText =
-                $"""
-                SELECT m.id, m.captured_at_ms, m.change_kind, m.user_caused, f.text
-                FROM manual_scans AS m
-                JOIN raw_events_fts AS f ON f.content_hash = m.content_hash
-                WHERE m.id IN ({BindIds(command, chunk)})
-                  AND (m.change_kind IS NULL OR m.change_kind IN ('Keyframe', 'Delta'));
+                """
+                SELECT id, captured_at_ms, process_name, window_title, label, summary, status, error,
+                       content_hash, model_id, uia_characters, ocr_characters, redactions, capture_ms,
+                       ocr_ms, inference_ms, ocr_language, page_key, app_name, site, subject, phase,
+                       mode, category, change_kind, last_seen_ms, user_caused, unsaved, dialog_title,
+                       event_kind, executable_path
+                FROM manual_scans
+                ORDER BY captured_at_ms DESC, id DESC
+                LIMIT $limit;
                 """;
+            command.Parameters.AddWithValue("$limit", limit);
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
-                if (reader.IsDBNull(4))
-                {
-                    continue;
-                }
-
-                texts.Add(new ScanText(
+                string? Text(int index) => reader.IsDBNull(index) ? null : reader.GetString(index);
+                looks.Add(new ManualScanRecord(
                     reader.GetString(0),
                     reader.GetInt64(1),
-                    !reader.IsDBNull(2) && Enum.TryParse<CaptureChange>(reader.GetString(2), out var change)
-                        ? change
-                        : CaptureChange.Keyframe,
-                    !reader.IsDBNull(3) && reader.GetInt64(3) != 0,
-                    reader.GetString(4)));
+                    reader.GetString(2),
+                    reader.GetString(3),
+                    Text(4),
+                    Text(5),
+                    Enum.TryParse<ManualScanStatus>(reader.GetString(6), out var status) ? status : ManualScanStatus.Completed,
+                    Text(7),
+                    reader.GetString(8),
+                    reader.GetString(9),
+                    reader.GetInt32(10),
+                    reader.GetInt32(11),
+                    reader.GetInt32(12),
+                    reader.GetDouble(13),
+                    reader.GetDouble(14),
+                    reader.GetDouble(15),
+                    OcrLanguage: Text(16),
+                    PageKey: Text(17),
+                    AppName: Text(18),
+                    Site: Text(19),
+                    Subject: Text(20),
+                    Phase: Text(21),
+                    Mode: Enum.TryParse<ActivityMode>(Text(22), out var mode) ? mode : null,
+                    Category: Enum.TryParse<ActivityCategory>(Text(23), out var category) ? category : null,
+                    Change: Enum.TryParse<CaptureChange>(Text(24), out var change) ? change : null,
+                    LastSeenMilliseconds: reader.IsDBNull(25) ? null : reader.GetInt64(25),
+                    UserCaused: !reader.IsDBNull(26) && reader.GetInt64(26) != 0,
+                    Unsaved: !reader.IsDBNull(27) && reader.GetInt64(27) != 0,
+                    DialogTitle: Text(28),
+                    EventKind: Text(29),
+                    ExecutablePath: Text(30)));
             }
         }
 
-        return texts.OrderBy(text => text.CapturedAtMilliseconds).ToList();
-    }
-
-    private static string BindIds(SqliteCommand command, IReadOnlyList<string> ids)
-    {
-        var names = new List<string>(ids.Count);
-        for (var index = 0; index < ids.Count; index++)
+        if (looks.Count == 0)
         {
-            var name = $"$id{index}";
-            names.Add(name);
-            command.Parameters.AddWithValue(name, ids[index]);
+            return looks;
         }
 
-        return string.Join(", ", names);
+        var texts = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        using (var command = _connection.CreateCommand())
+        {
+            command.CommandText =
+                $"SELECT scan_id, text FROM content_chunks WHERE scan_id IN ({BindIds(command, looks.Select(look => look.Id))}) ORDER BY id;";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var id = reader.GetString(0);
+                if (!texts.TryGetValue(id, out var lines))
+                {
+                    texts[id] = lines = [];
+                }
+
+                lines.Add(reader.GetString(1));
+            }
+        }
+
+        return looks
+            .Select(look => texts.TryGetValue(look.Id, out var lines)
+                ? look with { RedactedInputText = string.Join(Environment.NewLine, lines) }
+                : look)
+            .ToList();
     }
 
     private static ScanFacet ReadFacet(System.Data.Common.DbDataReader reader)
@@ -713,433 +465,368 @@ public sealed partial class Phase0Database
             Text(14),
             Text(15),
             !reader.IsDBNull(16) && reader.GetInt64(16) != 0,
-            Text(17),
-            Text(18));
+            Text(17));
     }
 
     // -----------------------------------------------------------------------
-    // Activities
+    // Page lines
     // -----------------------------------------------------------------------
 
-    public IReadOnlyList<ActivitySession> GetSessionsWithoutActivities(int limit = 50)
+    public IReadOnlySet<string> GetKnownLines(string pageKey, IReadOnlyCollection<string> lineKeys)
+    {
+        var known = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var batch in lineKeys.Chunk(400))
+        {
+            using var command = _connection.CreateCommand();
+            command.CommandText =
+                $"SELECT line_key FROM content_chunks WHERE page_key = $page AND line_key IN ({BindIds(command, batch, "k")});";
+            command.Parameters.AddWithValue("$page", pageKey);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                known.Add(reader.GetString(0));
+            }
+        }
+
+        return known;
+    }
+
+    public void TouchLines(string pageKey, IReadOnlyCollection<string> lineKeys, long nowMilliseconds)
+    {
+        foreach (var batch in lineKeys.Chunk(400))
+        {
+            using var command = _connection.CreateCommand();
+            command.CommandText =
+                $"""
+                UPDATE content_chunks SET last_seen_ms = MAX(last_seen_ms, $now)
+                WHERE page_key = $page AND line_key IN ({BindIds(command, batch, "k")});
+                """;
+            command.Parameters.AddWithValue("$page", pageKey);
+            command.Parameters.AddWithValue("$now", nowMilliseconds);
+            command.ExecuteNonQuery();
+        }
+    }
+
+    public void TouchLinesSeenAt(string pageKey, long readAtMilliseconds, long nowMilliseconds)
     {
         using var command = _connection.CreateCommand();
         command.CommandText =
-            $"""
-            SELECT {SessionColumns}
-            FROM activity_sessions
-            WHERE activities_built = 0 AND status = 'Closed'
-            ORDER BY started_at_ms ASC
-            LIMIT $limit;
+            """
+            UPDATE content_chunks SET last_seen_ms = $now
+            WHERE page_key = $page AND last_seen_ms = $readAt;
             """;
-        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 500));
-        using var reader = command.ExecuteReader();
-        var sessions = new List<ActivitySession>();
-        while (reader.Read())
-        {
-            sessions.Add(ReadSession(reader));
-        }
-
-        return sessions;
+        command.Parameters.AddWithValue("$page", pageKey);
+        command.Parameters.AddWithValue("$readAt", readAtMilliseconds);
+        command.Parameters.AddWithValue("$now", nowMilliseconds);
+        command.ExecuteNonQuery();
     }
 
-    public ActivitySession? GetSession(string id)
+    public IReadOnlyList<PageChunk> GetPageChunks(IReadOnlyCollection<string> pageKeys, long fromMilliseconds, long toMilliseconds)
+    {
+        if (pageKeys.Count == 0)
+        {
+            return [];
+        }
+
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            $"""
+            SELECT c.id, c.page_key, c.text, c.first_seen_ms, c.last_seen_ms, c.scan_id, c.typed,
+                   COALESCE(m.user_caused, 0)
+            FROM content_chunks AS c
+            LEFT JOIN manual_scans AS m ON m.id = c.scan_id
+            WHERE c.page_key IN ({BindIds(command, pageKeys, "p")})
+              AND c.first_seen_ms <= $to AND c.last_seen_ms >= $from
+            ORDER BY c.first_seen_ms ASC, c.id ASC;
+            """;
+        command.Parameters.AddWithValue("$from", fromMilliseconds);
+        command.Parameters.AddWithValue("$to", toMilliseconds);
+        using var reader = command.ExecuteReader();
+        var chunks = new List<PageChunk>();
+        while (reader.Read())
+        {
+            chunks.Add(new PageChunk(
+                reader.GetInt64(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetInt64(3),
+                reader.GetInt64(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.GetInt64(6) != 0,
+                reader.GetInt64(7) != 0));
+        }
+
+        return chunks;
+    }
+
+    // -----------------------------------------------------------------------
+    // Focus log
+    // -----------------------------------------------------------------------
+
+    public FocusRow? GetOpenFocus()
     {
         using var command = _connection.CreateCommand();
-        command.CommandText = $"SELECT {SessionColumns} FROM activity_sessions WHERE id = $id;";
-        command.Parameters.AddWithValue("$id", id);
+        command.CommandText =
+            """
+            SELECT id, started_at_ms, ended_at_ms, last_seen_ms, process_name, title, suppressed, suppressed_detail
+            FROM focus_log WHERE ended_at_ms IS NULL
+            ORDER BY started_at_ms DESC, id DESC LIMIT 1;
+            """;
         using var reader = command.ExecuteReader();
-        return reader.Read() ? ReadSession(reader) : null;
+        return reader.Read() ? ReadFocus(reader) : null;
     }
 
     /// <summary>
-    /// Writes a session's activities and its rolled-up label and summary in
-    /// one transaction. A user's verdict on an activity survives a rebuild
-    /// when the same activity comes back out of the segmenter.
+    /// A window came to the front at <paramref name="atMilliseconds"/>: the
+    /// stretch before it ends there and this one begins.
     /// </summary>
-    public void ReplaceSessionActivities(ActivitySession session, IReadOnlyList<ActivityRecord> activities)
+    public FocusRow OpenFocus(long atMilliseconds, string processName, string? title, string? suppressed, string? suppressedDetail)
     {
-        ArgumentNullException.ThrowIfNull(session);
-        ArgumentNullException.ThrowIfNull(activities);
-        // Segmentation is deterministic, so a rebuild yields the same key and
-        // start for the same activity; anything else is genuinely new.
-        var previous = new Dictionary<string, ActivityRecord>(StringComparer.Ordinal);
-        foreach (var old in GetSessionActivities(session.Id))
-        {
-            previous.TryAdd($"{old.Key}@{old.StartedAtMilliseconds}", old);
-        }
-
         using var transaction = _connection.BeginTransaction();
-        using (var delete = _connection.CreateCommand())
+        using (var close = _connection.CreateCommand())
         {
-            delete.Transaction = transaction;
-            delete.CommandText = "DELETE FROM activities WHERE session_id = $session;";
-            delete.Parameters.AddWithValue("$session", session.Id);
-            delete.ExecuteNonQuery();
+            close.Transaction = transaction;
+            close.CommandText =
+                """
+                UPDATE focus_log SET ended_at_ms = MAX(started_at_ms, $at), last_seen_ms = MAX(last_seen_ms, $at)
+                WHERE ended_at_ms IS NULL;
+                """;
+            close.Parameters.AddWithValue("$at", atMilliseconds);
+            close.ExecuteNonQuery();
         }
 
-        foreach (var activity in activities)
+        long id;
+        using (var insert = _connection.CreateCommand())
         {
-            var kept = activity;
-            if (kept.Check == SummaryCheck.Pending
-                && !previous.ContainsKey($"{activity.Key}@{activity.StartedAtMilliseconds}")
-                && TakeEarlyNarration(activity, transaction) is { } early)
-            {
-                // Summarized while recording, as soon as it ended.
-                kept = early;
-            }
-
-            if (previous.TryGetValue($"{activity.Key}@{activity.StartedAtMilliseconds}", out var old))
-            {
-                kept = kept with { Id = old.Id };
-                // Keep a summary already paid for, and anything the user said.
-                if (old.Check is SummaryCheck.Verified or SummaryCheck.Partial && kept.Check == SummaryCheck.Pending)
-                {
-                    kept = kept with
-                    {
-                        Label = old.Label,
-                        Summary = old.Summary,
-                        Task = old.Task,
-                        TaskStatus = old.TaskStatus,
-                        Check = old.Check,
-                        FactsKept = old.FactsKept,
-                        FactsDropped = old.FactsDropped
-                    };
-                }
-
-                if (old.TaskSetByUser)
-                {
-                    kept = kept with { Task = old.Task, TaskStatus = old.TaskStatus, TaskSetByUser = true };
-                }
-            }
-
-            WriteActivity(kept, transaction);
+            insert.Transaction = transaction;
+            insert.CommandText =
+                """
+                INSERT INTO focus_log (started_at_ms, ended_at_ms, last_seen_ms, process_name, title, suppressed, suppressed_detail)
+                VALUES ($at, NULL, $at, $process, $title, $suppressed, $detail)
+                RETURNING id;
+                """;
+            insert.Parameters.AddWithValue("$at", atMilliseconds);
+            insert.Parameters.AddWithValue("$process", processName);
+            insert.Parameters.AddWithValue("$title", (object?)title ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$suppressed", (object?)suppressed ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$detail", (object?)suppressedDetail ?? DBNull.Value);
+            id = Convert.ToInt64(insert.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
         }
 
-        UpsertSession(session, transaction);
-        using (var mark = _connection.CreateCommand())
+        transaction.Commit();
+        return new FocusRow(id, atMilliseconds, null, atMilliseconds, processName, title, suppressed, suppressedDetail);
+    }
+
+    /// Ends whatever is in front at <paramref name="atMilliseconds"/>: the user left, locked, or recording stopped.
+    public void CloseFocus(long atMilliseconds)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            UPDATE focus_log SET ended_at_ms = MAX(started_at_ms, $at), last_seen_ms = MAX(last_seen_ms, $at)
+            WHERE ended_at_ms IS NULL;
+            """;
+        command.Parameters.AddWithValue("$at", atMilliseconds);
+        command.ExecuteNonQuery();
+    }
+
+    /// The window in front is still in front.
+    public void TouchFocus(long atMilliseconds)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            "UPDATE focus_log SET last_seen_ms = MAX(last_seen_ms, $at) WHERE ended_at_ms IS NULL;";
+        command.Parameters.AddWithValue("$at", atMilliseconds);
+        command.ExecuteNonQuery();
+    }
+
+    /// After a crash nothing closed the last stretch: it ends where it was last seen.
+    public void CloseDanglingFocus()
+    {
+        Execute("UPDATE focus_log SET ended_at_ms = last_seen_ms WHERE ended_at_ms IS NULL;");
+    }
+
+    /// Stretches in front at some point in [from, to), oldest first.
+    public IReadOnlyList<FocusRow> GetFocusBetween(long fromMilliseconds, long toMilliseconds)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT id, started_at_ms, ended_at_ms, last_seen_ms, process_name, title, suppressed, suppressed_detail
+            FROM focus_log
+            WHERE started_at_ms < $to AND COALESCE(ended_at_ms, last_seen_ms) >= $from
+            ORDER BY started_at_ms ASC, id ASC;
+            """;
+        command.Parameters.AddWithValue("$from", fromMilliseconds);
+        command.Parameters.AddWithValue("$to", toMilliseconds);
+        using var reader = command.ExecuteReader();
+        var rows = new List<FocusRow>();
+        while (reader.Read())
         {
-            mark.Transaction = transaction;
-            mark.CommandText = "UPDATE activity_sessions SET activities_built = 1 WHERE id = $id;";
-            mark.Parameters.AddWithValue("$id", session.Id);
-            mark.ExecuteNonQuery();
+            rows.Add(ReadFocus(reader));
+        }
+
+        return rows;
+    }
+
+    /// Adds stretches recorded elsewhere (the timeline files of earlier versions).
+    public void ImportFocus(IReadOnlyList<FocusRow> rows)
+    {
+        using var transaction = _connection.BeginTransaction();
+        foreach (var row in rows)
+        {
+            using var insert = _connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText =
+                """
+                INSERT INTO focus_log (started_at_ms, ended_at_ms, last_seen_ms, process_name, title, suppressed, suppressed_detail)
+                VALUES ($start, $end, $seen, $process, $title, $suppressed, $detail);
+                """;
+            insert.Parameters.AddWithValue("$start", row.StartedAtMilliseconds);
+            insert.Parameters.AddWithValue("$end", (object?)row.EndedAtMilliseconds ?? row.LastSeenMilliseconds);
+            insert.Parameters.AddWithValue("$seen", row.LastSeenMilliseconds);
+            insert.Parameters.AddWithValue("$process", row.ProcessName);
+            insert.Parameters.AddWithValue("$title", (object?)row.Title ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$suppressed", (object?)row.Suppressed ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$detail", (object?)row.SuppressedDetail ?? DBNull.Value);
+            insert.ExecuteNonQuery();
         }
 
         transaction.Commit();
     }
 
-    /// <summary>
-    /// A summary written while recording, for an activity that ended before
-    /// its session did. Kept until the session is sealed, then moved onto
-    /// the stored activity.
-    /// </summary>
-    public void SaveEarlyNarration(ActivityRecord activity, long nowMilliseconds)
+    private static FocusRow ReadFocus(System.Data.Common.DbDataReader reader) =>
+        new(
+            reader.GetInt64(0),
+            reader.GetInt64(1),
+            reader.IsDBNull(2) ? null : reader.GetInt64(2),
+            reader.GetInt64(3),
+            reader.GetString(4),
+            reader.IsDBNull(5) ? null : reader.GetString(5),
+            reader.IsDBNull(6) ? null : reader.GetString(6),
+            reader.IsDBNull(7) ? null : reader.GetString(7));
+
+    // -----------------------------------------------------------------------
+    // What cannot be worked out again: summaries and the user's verdicts
+    // -----------------------------------------------------------------------
+
+    public IReadOnlyList<StoredSummary> GetSummaries(IReadOnlyCollection<string> activityKeys)
     {
-        ArgumentNullException.ThrowIfNull(activity);
+        var summaries = new List<StoredSummary>();
+        foreach (var batch in activityKeys.Distinct(StringComparer.Ordinal).Chunk(400))
+        {
+            using var command = _connection.CreateCommand();
+            command.CommandText =
+                $"""
+                SELECT activity_key, started_at_ms, text_hash, label, summary, task, check_state, facts_kept, facts_dropped
+                FROM activity_summaries
+                WHERE activity_key IN ({BindIds(command, batch, "k")});
+                """;
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                summaries.Add(new StoredSummary(
+                    reader.GetString(0),
+                    reader.GetInt64(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    Enum.TryParse<SummaryCheck>(reader.GetString(6), out var check) ? check : SummaryCheck.Rule,
+                    reader.GetInt32(7),
+                    reader.GetInt32(8)));
+            }
+        }
+
+        return summaries;
+    }
+
+    public void SaveSummary(StoredSummary summary, long nowMilliseconds)
+    {
+        ArgumentNullException.ThrowIfNull(summary);
         using var command = _connection.CreateCommand();
         command.CommandText =
             """
-            INSERT INTO early_narrations
-                (activity_key, started_at_ms, ended_at_ms, label, summary, task, task_status,
-                 check_state, facts_kept, facts_dropped, created_at_ms)
-            VALUES ($key, $start, $end, $label, $summary, $task, $taskStatus,
-                    $check, $kept, $dropped, $now)
-            ON CONFLICT(activity_key, started_at_ms) DO UPDATE SET
-                ended_at_ms = excluded.ended_at_ms, label = excluded.label,
-                summary = excluded.summary, task = excluded.task,
-                task_status = excluded.task_status, check_state = excluded.check_state,
-                facts_kept = excluded.facts_kept, facts_dropped = excluded.facts_dropped,
-                created_at_ms = excluded.created_at_ms;
+            INSERT OR REPLACE INTO activity_summaries
+                (activity_key, started_at_ms, text_hash, label, summary, task, check_state, facts_kept, facts_dropped, created_at_ms)
+            VALUES ($key, $start, $hash, $label, $summary, $task, $check, $kept, $dropped, $now);
             """;
-        command.Parameters.AddWithValue("$key", activity.Key);
-        command.Parameters.AddWithValue("$start", activity.StartedAtMilliseconds);
-        command.Parameters.AddWithValue("$end", activity.EndedAtMilliseconds);
-        command.Parameters.AddWithValue("$label", activity.Label);
-        command.Parameters.AddWithValue("$summary", (object?)activity.Summary ?? DBNull.Value);
-        command.Parameters.AddWithValue("$task", (object?)activity.Task ?? DBNull.Value);
-        command.Parameters.AddWithValue("$taskStatus", activity.TaskStatus.ToString());
-        command.Parameters.AddWithValue("$check", activity.Check.ToString());
-        command.Parameters.AddWithValue("$kept", activity.FactsKept);
-        command.Parameters.AddWithValue("$dropped", activity.FactsDropped);
+        command.Parameters.AddWithValue("$key", summary.ActivityKey);
+        command.Parameters.AddWithValue("$start", summary.StartedAtMilliseconds);
+        command.Parameters.AddWithValue("$hash", (object?)summary.TextHash ?? DBNull.Value);
+        command.Parameters.AddWithValue("$label", summary.Label);
+        command.Parameters.AddWithValue("$summary", (object?)summary.Summary ?? DBNull.Value);
+        command.Parameters.AddWithValue("$task", (object?)summary.Task ?? DBNull.Value);
+        command.Parameters.AddWithValue("$check", summary.Check.ToString());
+        command.Parameters.AddWithValue("$kept", summary.FactsKept);
+        command.Parameters.AddWithValue("$dropped", summary.FactsDropped);
         command.Parameters.AddWithValue("$now", nowMilliseconds);
         command.ExecuteNonQuery();
     }
 
-    /// Whether this activity, as it stands, already has an early summary.
-    public bool HasEarlyNarration(ActivityRecord activity)
+    public IReadOnlyDictionary<string, ActivityTaskStatus> GetTaskStatuses(IReadOnlyCollection<string> activityIds)
     {
-        ArgumentNullException.ThrowIfNull(activity);
-        using var command = _connection.CreateCommand();
-        command.CommandText =
-            """
-            SELECT ended_at_ms FROM early_narrations
-            WHERE activity_key = $key AND started_at_ms = $start;
-            """;
-        command.Parameters.AddWithValue("$key", activity.Key);
-        command.Parameters.AddWithValue("$start", activity.StartedAtMilliseconds);
-        var ended = command.ExecuteScalar();
-        return ended is long end && Math.Abs(end - activity.EndedAtMilliseconds) <= ActivitySegmenter.FillGapUpToMilliseconds;
-    }
-
-    /// <summary>
-    /// The early summary for this activity, removed from the waiting list.
-    /// Only used when the activity still ends where it did when it was
-    /// summarized (within the fill-gap allowance): one that grew since has
-    /// more text, and is summarized again from all of it.
-    /// </summary>
-    private ActivityRecord? TakeEarlyNarration(ActivityRecord activity, Microsoft.Data.Sqlite.SqliteTransaction transaction)
-    {
-        using var command = _connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText =
-            """
-            SELECT ended_at_ms, label, summary, task, task_status, check_state, facts_kept, facts_dropped
-            FROM early_narrations
-            WHERE activity_key = $key AND started_at_ms = $start;
-            """;
-        command.Parameters.AddWithValue("$key", activity.Key);
-        command.Parameters.AddWithValue("$start", activity.StartedAtMilliseconds);
-        ActivityRecord? taken = null;
-        using (var reader = command.ExecuteReader())
+        var statuses = new Dictionary<string, ActivityTaskStatus>(StringComparer.Ordinal);
+        foreach (var batch in activityIds.Chunk(400))
         {
-            if (reader.Read()
-                && Math.Abs(reader.GetInt64(0) - activity.EndedAtMilliseconds) <= ActivitySegmenter.FillGapUpToMilliseconds)
-            {
-                taken = activity with
-                {
-                    Label = reader.GetString(1),
-                    Summary = reader.IsDBNull(2) ? null : reader.GetString(2),
-                    Task = reader.IsDBNull(3) ? null : reader.GetString(3),
-                    TaskStatus = Enum.TryParse<ActivityTaskStatus>(reader.GetString(4), out var status) ? status : ActivityTaskStatus.None,
-                    Check = Enum.TryParse<SummaryCheck>(reader.GetString(5), out var check) ? check : SummaryCheck.Pending,
-                    FactsKept = reader.GetInt32(6),
-                    FactsDropped = reader.GetInt32(7)
-                };
-            }
-        }
-
-        using var delete = _connection.CreateCommand();
-        delete.Transaction = transaction;
-        delete.CommandText = "DELETE FROM early_narrations WHERE activity_key = $key AND started_at_ms = $start;";
-        delete.Parameters.AddWithValue("$key", activity.Key);
-        delete.Parameters.AddWithValue("$start", activity.StartedAtMilliseconds);
-        delete.ExecuteNonQuery();
-        return taken;
-    }
-
-    /// <summary>
-    /// After a crash or a shutdown the last recording never got its stop. If
-    /// the newest run marker is a start with no stop after it, the run is
-    /// closed at the last moment anything was seen, so it can be sealed and
-    /// summarized. Returns whether anything was waiting to be processed.
-    /// </summary>
-    public RecoveryResult RecoverUnfinishedRun(long nowMilliseconds)
-    {
-        string? lastKind = null;
-        long lastAt = 0;
-        using (var command = _connection.CreateCommand())
-        {
+            using var command = _connection.CreateCommand();
             command.CommandText =
-                """
-                SELECT kind, ts_ms FROM activity_markers
-                WHERE kind IN ('run.started', 'run.stopped', 'system.shutdown')
-                ORDER BY ts_ms DESC, id DESC LIMIT 1;
-                """;
+                $"SELECT activity_id, status FROM activity_tasks WHERE activity_id IN ({BindIds(command, batch)});";
             using var reader = command.ExecuteReader();
-            if (reader.Read())
+            while (reader.Read())
             {
-                lastKind = reader.GetString(0);
-                lastAt = reader.GetInt64(1);
+                if (Enum.TryParse<ActivityTaskStatus>(reader.GetString(1), out var status))
+                {
+                    statuses[reader.GetString(0)] = status;
+                }
             }
         }
 
-        var closed = false;
-        long? closedAt = null;
-        if (lastKind is "run.started" or "system.shutdown")
-        {
-            using var seen = _connection.CreateCommand();
-            seen.CommandText =
-                "SELECT MAX(COALESCE(last_seen_ms, captured_at_ms)) FROM manual_scans WHERE captured_at_ms >= $from;";
-            seen.Parameters.AddWithValue("$from", lastAt);
-            var lastSeen = seen.ExecuteScalar() is long value ? value : lastAt;
-            closedAt = Math.Min(Math.Max(lastSeen, lastAt), nowMilliseconds);
-            RecordMarker("run.stopped", closedAt.Value);
-            closed = true;
-        }
-
-        using var waiting = _connection.CreateCommand();
-        waiting.CommandText =
-            """
-            SELECT (SELECT COUNT(*) FROM manual_scans WHERE session_id IS NULL)
-                 + (SELECT COUNT(*) FROM activities WHERE check_state = 'Pending');
-            """;
-        var pending = Convert.ToInt64(waiting.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
-        return new RecoveryResult(closed, closedAt, pending);
-    }
-
-    public IReadOnlyList<ActivityRecord> GetActivitiesPendingNarration(int limit = 10)
-    {
-        using var command = _connection.CreateCommand();
-        command.CommandText =
-            $"""
-            SELECT {ActivityColumns}
-            FROM activities
-            WHERE check_state = 'Pending'
-            ORDER BY started_at_ms DESC
-            LIMIT $limit;
-            """;
-        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 200));
-        return ReadActivities(command);
-    }
-
-    public IReadOnlyList<ActivityRecord> GetSessionActivities(string sessionId)
-    {
-        using var command = _connection.CreateCommand();
-        command.CommandText =
-            $"""
-            SELECT {ActivityColumns}
-            FROM activities
-            WHERE session_id = $session
-            ORDER BY started_at_ms ASC;
-            """;
-        command.Parameters.AddWithValue("$session", sessionId);
-        return ReadActivities(command);
-    }
-
-    public IReadOnlyList<ActivityRecord> GetRecentActivities(int limit = 200)
-    {
-        using var command = _connection.CreateCommand();
-        command.CommandText =
-            $"""
-            SELECT {ActivityColumns}
-            FROM activities
-            ORDER BY started_at_ms DESC
-            LIMIT $limit;
-            """;
-        command.Parameters.AddWithValue("$limit", Math.Clamp(limit, 1, 1_000));
-        return ReadActivities(command);
-    }
-
-    /// Activities overlapping [from, to), oldest first.
-    public IReadOnlyList<ActivityRecord> GetActivitiesBetween(long fromMilliseconds, long toMilliseconds)
-    {
-        using var command = _connection.CreateCommand();
-        command.CommandText =
-            $"""
-            SELECT {ActivityColumns}
-            FROM activities
-            WHERE started_at_ms < $to AND ended_at_ms >= $from
-            ORDER BY started_at_ms ASC
-            LIMIT 3000;
-            """;
-        command.Parameters.AddWithValue("$from", fromMilliseconds);
-        command.Parameters.AddWithValue("$to", toMilliseconds);
-        return ReadActivities(command);
-    }
-
-    public ActivityRecord? GetActivity(string id)
-    {
-        using var command = _connection.CreateCommand();
-        command.CommandText = $"SELECT {ActivityColumns} FROM activities WHERE id = $id;";
-        command.Parameters.AddWithValue("$id", id);
-        return ReadActivities(command).FirstOrDefault();
-    }
-
-    public void UpdateActivity(ActivityRecord activity)
-    {
-        ArgumentNullException.ThrowIfNull(activity);
-        WriteActivity(activity, null);
+        return statuses;
     }
 
     /// The user's verdict on an activity's task. Absolute: no rule rewrites it.
-    public ActivityRecord? SetActivityTaskStatus(string id, ActivityTaskStatus status)
-    {
-        var activity = GetActivity(id);
-        if (activity is null)
-        {
-            return null;
-        }
-
-        var updated = activity with { TaskStatus = status, TaskSetByUser = true };
-        WriteActivity(updated, null);
-        return updated;
-    }
-
-    private void WriteActivity(ActivityRecord activity, SqliteTransaction? transaction)
+    public void SetActivityTaskStatus(string activityId, ActivityTaskStatus status, long atMilliseconds)
     {
         using var command = _connection.CreateCommand();
-        command.Transaction = transaction;
         command.CommandText =
-            $"""
-            INSERT OR REPLACE INTO activities ({ActivityColumns})
-            VALUES ($id, $session, $key, $app, $site, $subject, $mode, $category, $started,
-                    $ended, $active, $segments, $glances, $events, $phases, $scans, $label,
-                    $summary, $task, $taskStatus, $taskByUser, $check, $kept, $dropped);
-            """;
-        command.Parameters.AddWithValue("$id", activity.Id);
-        command.Parameters.AddWithValue("$session", activity.SessionId);
-        command.Parameters.AddWithValue("$key", activity.Key);
-        command.Parameters.AddWithValue("$app", activity.App);
-        command.Parameters.AddWithValue("$site", (object?)activity.Site ?? DBNull.Value);
-        command.Parameters.AddWithValue("$subject", activity.Subject);
-        command.Parameters.AddWithValue("$mode", activity.Mode.ToString());
-        command.Parameters.AddWithValue("$category", activity.Category.ToString());
-        command.Parameters.AddWithValue("$started", activity.StartedAtMilliseconds);
-        command.Parameters.AddWithValue("$ended", activity.EndedAtMilliseconds);
-        command.Parameters.AddWithValue("$active", activity.ActiveMilliseconds);
-        command.Parameters.AddWithValue("$segments", JsonSerializer.Serialize(activity.Segments, ActivityJson));
-        command.Parameters.AddWithValue("$glances", JsonSerializer.Serialize(activity.Glances, ActivityJson));
-        command.Parameters.AddWithValue("$events", JsonSerializer.Serialize(activity.Events, ActivityJson));
-        command.Parameters.AddWithValue("$phases", JsonSerializer.Serialize(activity.Phases, ActivityJson));
-        command.Parameters.AddWithValue("$scans", JsonSerializer.Serialize(activity.ScanIds, ActivityJson));
-        command.Parameters.AddWithValue("$label", activity.Label);
-        command.Parameters.AddWithValue("$summary", (object?)activity.Summary ?? DBNull.Value);
-        command.Parameters.AddWithValue("$task", (object?)activity.Task ?? DBNull.Value);
-        command.Parameters.AddWithValue("$taskStatus", activity.TaskStatus.ToString());
-        command.Parameters.AddWithValue("$taskByUser", activity.TaskSetByUser ? 1 : 0);
-        command.Parameters.AddWithValue("$check", activity.Check.ToString());
-        command.Parameters.AddWithValue("$kept", activity.FactsKept);
-        command.Parameters.AddWithValue("$dropped", activity.FactsDropped);
+            "INSERT OR REPLACE INTO activity_tasks (activity_id, status, set_at_ms) VALUES ($id, $status, $at);";
+        command.Parameters.AddWithValue("$id", activityId);
+        command.Parameters.AddWithValue("$status", status.ToString());
+        command.Parameters.AddWithValue("$at", atMilliseconds);
         command.ExecuteNonQuery();
     }
 
-    private static IReadOnlyList<ActivityRecord> ReadActivities(SqliteCommand command)
+    public IReadOnlyDictionary<string, SessionOutcome> GetSessionOutcomes(IReadOnlyCollection<string> sessionIds)
     {
-        using var reader = command.ExecuteReader();
-        var activities = new List<ActivityRecord>();
-        while (reader.Read())
+        var outcomes = new Dictionary<string, SessionOutcome>(StringComparer.Ordinal);
+        foreach (var batch in sessionIds.Chunk(400))
         {
-            string? Text(int index) => reader.IsDBNull(index) ? null : reader.GetString(index);
-            T Json<T>(int index) where T : class =>
-                JsonSerializer.Deserialize<T>(Text(index) ?? "[]", ActivityJson)
-                ?? throw new InvalidDataException("Activity column is not valid JSON.");
-            activities.Add(new ActivityRecord(
-                reader.GetString(0),
-                reader.GetString(1),
-                reader.GetString(2),
-                reader.GetString(3),
-                Text(4),
-                reader.GetString(5),
-                Enum.TryParse<ActivityMode>(reader.GetString(6), out var mode) ? mode : ActivityMode.Read,
-                Enum.TryParse<ActivityCategory>(reader.GetString(7), out var category) ? category : ActivityCategory.Other,
-                reader.GetInt64(8),
-                reader.GetInt64(9),
-                reader.GetInt64(10),
-                Json<List<ActivitySegment>>(11),
-                Json<List<ActivityGlance>>(12),
-                Json<List<ActivityEvent>>(13),
-                Json<List<string>>(14),
-                Json<List<string>>(15),
-                reader.GetString(16),
-                Text(17),
-                Text(18),
-                Enum.TryParse<ActivityTaskStatus>(reader.GetString(19), out var taskStatus) ? taskStatus : ActivityTaskStatus.None,
-                reader.GetInt64(20) != 0,
-                Enum.TryParse<SummaryCheck>(reader.GetString(21), out var check) ? check : SummaryCheck.Rule,
-                reader.GetInt32(22),
-                reader.GetInt32(23)));
+            using var command = _connection.CreateCommand();
+            command.CommandText =
+                $"SELECT session_id, outcome FROM session_outcomes WHERE session_id IN ({BindIds(command, batch)});";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                if (Enum.TryParse<SessionOutcome>(reader.GetString(1), out var outcome))
+                {
+                    outcomes[reader.GetString(0)] = outcome;
+                }
+            }
         }
 
-        return activities;
+        return outcomes;
+    }
+
+    /// The user's own verdict on a session. Absolute: no rule overwrites it.
+    public void SetSessionOutcome(string sessionId, SessionOutcome outcome, long atMilliseconds)
+    {
+        using var command = _connection.CreateCommand();
+        command.CommandText =
+            "INSERT OR REPLACE INTO session_outcomes (session_id, outcome, set_at_ms) VALUES ($id, $outcome, $at);";
+        command.Parameters.AddWithValue("$id", sessionId);
+        command.Parameters.AddWithValue("$outcome", outcome.ToString());
+        command.Parameters.AddWithValue("$at", atMilliseconds);
+        command.ExecuteNonQuery();
     }
 }

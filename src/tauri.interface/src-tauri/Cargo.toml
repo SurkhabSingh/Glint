@@ -27,7 +27,6 @@ tauri-plugin-global-shortcut = "2"
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 chrono = "0.4"
 window-vibrancy = "0.8.0"
-base64 = "0.23.1"
 windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_UI_Accessibility",
@@ -36,7 +35,6 @@ windows = { version = "0.62", features = [
   "Win32_System_Threading",
   "Win32_System_SystemInformation",
   "Win32_System_Power",
-  "Win32_Security_Cryptography",
   "Win32_UI_Shell",
   "Win32_Graphics_Gdi",
   "Win32_System_LibraryLoader",

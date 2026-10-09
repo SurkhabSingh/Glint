@@ -20,6 +20,17 @@ try
 
     switch (command)
     {
+        // Glint's backend: the one process that owns the store, the looks
+        // and the model. JSON lines on stdin and stdout; see GlintBackend.
+        case "serve":
+        {
+            using var backend = new GlintBackend(dataRoot, options);
+            using var input = new StreamReader(Console.OpenStandardInput(), new System.Text.UTF8Encoding(false));
+            using var output = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false));
+            await backend.RunAsync(input, output);
+            break;
+        }
+
         case "compatibility":
         {
             var report = new WindowsCompatibilityService().Inspect();
@@ -107,7 +118,7 @@ try
             var ocr = await new WindowsGraphicsCaptureService(
                     options.ContainsKey("software-device"))
                 .CaptureAndRecognizeAsync(window);
-            var combined = CapturePipeline.CombineText(uia.Text, ocr.Text);
+            var combined = ScreenText.Combine(uia.Text, ocr.Text);
             var dropReason = SecretSniffer.ShouldDrop(combined);
             var redacted = dropReason is null
                 ? new DeterministicRedactor().Redact(combined)
@@ -145,189 +156,6 @@ try
             break;
         }
 
-        case "pipeline":
-        {
-            await DelayAsync(options);
-            using var database = OpenDatabase(dataRoot, options);
-            var pipeline = new CapturePipeline(
-                new ForegroundWindowInspector(HostProcessId(options)),
-                new UiAutomationService(),
-                new PrivacyGate(),
-                new WindowsGraphicsCaptureService(),
-                new DeterministicRedactor(),
-                database);
-            var outcome = await pipeline.CaptureOnceAsync();
-            WriteJson(
-                new
-                {
-                    outcome,
-                    eventCount = database.CountEvents(),
-                    storage = database.GetDiagnostics()
-                },
-                json);
-            break;
-        }
-
-        case "storage":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            WriteJson(
-                new
-                {
-                    database = database.GetDiagnostics(),
-                    eventCount = database.CountEvents()
-                },
-                json);
-            break;
-        }
-
-        case "search":
-        {
-            var query = options.GetValueOrDefault("query")
-                ?? throw new ArgumentException("search requires --query <text>.");
-            using var database = OpenDatabase(dataRoot, options);
-            WriteJson(new { query, results = database.Search(query) }, json);
-            break;
-        }
-
-        case "vector-smoke":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var first = new float[768];
-            var second = new float[768];
-            var query = new float[768];
-            first[0] = 1;
-            second[1] = 1;
-            query[0] = 0.95f;
-            query[1] = 0.05f;
-            database.UpsertEmbedding(1, first);
-            database.UpsertEmbedding(2, second);
-            WriteJson(new { results = database.SearchEmbeddings(query, 2) }, json);
-            break;
-        }
-
-        case "manual-history":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var limit = int.TryParse(options.GetValueOrDefault("limit"), out var parsedLimit)
-                ? parsedLimit
-                : 50;
-            WriteJson(new { scans = database.GetRecentManualScans(limit) }, json);
-            break;
-        }
-
-        // Agent chat history. All chat text lives in the encrypted store;
-        // nothing here prints prompts or answers to metrics, only the JSON
-        // documents the frontend asked for.
-        case "chat-threads":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var limit = int.TryParse(options.GetValueOrDefault("limit"), out var parsedLimit)
-                ? Math.Clamp(parsedLimit, 1, 200)
-                : 50;
-            WriteJson(new { threads = database.GetRecentChatThreads(limit) }, json);
-            break;
-        }
-
-        case "chat-thread":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var id = RequireOption(options, "id");
-            var thread = database.GetChatThread(id)
-                ?? throw new ArgumentException($"Unknown chat thread: {id}.");
-            var limit = int.TryParse(options.GetValueOrDefault("limit"), out var parsedLimit)
-                ? Math.Clamp(parsedLimit, 1, 2_000)
-                : 200;
-            WriteJson(
-                new { thread, messages = database.GetChatMessages(id, limit) },
-                json);
-            break;
-        }
-
-        case "chat-create":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            WriteJson(
-                database.CreateChatThread(
-                    RequireOption(options, "title"),
-                    options.GetValueOrDefault("scope", "all") ?? "all",
-                    long.TryParse(options.GetValueOrDefault("at"), out var parsedAt)
-                        ? parsedAt
-                        : now),
-                json);
-            break;
-        }
-
-        case "chat-rename":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var id = RequireOption(options, "id");
-            database.RenameChatThread(
-                id,
-                RequireOption(options, "title"),
-                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-            WriteJson(new { id }, json);
-            break;
-        }
-
-        case "chat-delete":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var id = RequireOption(options, "id");
-            database.DeleteChatThread(id);
-            WriteJson(new { id }, json);
-            break;
-        }
-
-        case "chat-append":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            WriteJson(
-                database.AppendChatMessage(
-                    RequireOption(options, "thread"),
-                    RequireOption(options, "role"),
-                    RequireOption(options, "text"),
-                    options.GetValueOrDefault("citations", "[]") ?? "[]",
-                    int.TryParse(options.GetValueOrDefault("scoped"), out var parsedScoped)
-                        ? parsedScoped
-                        : 0,
-                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
-                json);
-            break;
-        }
-
-        case "manual-scan":
-        {
-            await DelayAsync(options);
-            // Capture no longer runs the model, so it does not need the Gemma
-            // runtime and works even before one is installed. Summaries
-            // arrive per session, from the sessionize verb.
-            using var database = OpenDatabase(dataRoot, options);
-            // The activity model: identity first, then what this kind of app
-            // needs. Text only for reading work, compared line by line with
-            // what the same page already stored.
-            // A stutter test can turn either suspect off for one run.
-            IUiAutomationService automation = StutterTestMode.AccessibilityOff
-                ? new InertAutomation()
-                : new UiAutomationService();
-            IFrameCaptureService frames = StutterTestMode.CaptureOff
-                ? new DisabledFrameCapture()
-                : new WindowsGraphicsCaptureService(options.ContainsKey("software-device"));
-            var coordinator = new ActivityScanCoordinator(
-                new ForegroundWindowInspector(HostProcessId(options)),
-                automation,
-                (IPageReader)automation,
-                new PrivacyGate(),
-                frames,
-                new DeterministicRedactor(),
-                database);
-            WriteJson(await coordinator.ScanAsync(), json);
-            break;
-        }
-
-        // Diagnostics: what the page probe sees in a window. Records control
-        // types, names and parsed hosts only, never field values.
         case "page-probe":
         {
             var processName = options.GetValueOrDefault("process");
@@ -504,216 +332,6 @@ try
             break;
         }
 
-        // One answer, for diagnostics and scripts. The app uses ask-serve.
-        case "ask":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var resolution = LiteRtRuntimeLocator.Resolve(AppContext.BaseDirectory, dataRoot);
-            using var worker = resolution.IsReady && !options.ContainsKey("no-model")
-                ? new PersistentLiteRtWorker(
-                    resolution.PythonExecutable!,
-                    resolution.WorkerScript!,
-                    resolution.ModelPath!,
-                    maxNumTokens: 4096,
-                    idleUnloadAfter: Timeout.InfiniteTimeSpan)
-                : null;
-            var answer = await new AskEngine(new DatabaseAskSource(database), worker).AnswerAsync(
-                new AskRequest(
-                    RequireOption(options, "question"),
-                    options.GetValueOrDefault("scope"),
-                    options.GetValueOrDefault("day")));
-            WriteJson(answer, json);
-            break;
-        }
-
-        // The app's Ask: one long-lived process that keeps the model loaded
-        // between questions, so only the first question pays for loading it.
-        // Reads one JSON request per line on stdin and writes one JSON answer
-        // per line on stdout. Questions travel over the pipe, never in argv.
-        case "ask-serve":
-        {
-            var line = new JsonSerializerOptions(JsonSerializerDefaults.Web);
-            using var input = new StreamReader(Console.OpenStandardInput(), new System.Text.UTF8Encoding(false));
-            using var output = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
-            PersistentLiteRtWorker? worker = null;
-            try
-            {
-                while (true)
-                {
-                    var reading = input.ReadLineAsync();
-                    if (await Task.WhenAny(reading, Task.Delay(TimeSpan.FromMinutes(30))) != reading)
-                    {
-                        break; // idle: the host starts a new one when needed
-                    }
-
-                    var requestLine = await reading;
-                    if (requestLine is null)
-                    {
-                        break; // the host closed the pipe
-                    }
-
-                    if (string.IsNullOrWhiteSpace(requestLine))
-                    {
-                        continue;
-                    }
-
-                    try
-                    {
-                        var request = JsonSerializer.Deserialize<AskRequest>(requestLine, line)
-                            ?? throw new InvalidDataException("Empty request.");
-                        if (worker is null)
-                        {
-                            var resolution = LiteRtRuntimeLocator.Resolve(AppContext.BaseDirectory, dataRoot);
-                            if (resolution.IsReady)
-                            {
-                                worker = new PersistentLiteRtWorker(
-                                    resolution.PythonExecutable!,
-                                    resolution.WorkerScript!,
-                                    resolution.ModelPath!,
-                                    maxNumTokens: 4096,
-                                    idleUnloadAfter: TimeSpan.FromMinutes(5));
-                            }
-                        }
-
-                        // Opened per question, so every answer sees the latest data.
-                        using var database = OpenDatabase(dataRoot, options);
-                        var answer = await new AskEngine(new DatabaseAskSource(database), worker).AnswerAsync(request);
-                        await output.WriteLineAsync(JsonSerializer.Serialize(answer, line));
-                    }
-                    catch (Exception error)
-                    {
-                        await output.WriteLineAsync(JsonSerializer.Serialize(new { error = $"{error.GetType().Name}: {error.Message}" }, line));
-                    }
-                }
-            }
-            finally
-            {
-                worker?.Dispose();
-            }
-
-            break;
-        }
-
-        // The capture worker: one process for the whole time Glint runs, with
-        // the encrypted database opened once. Every look, every window-switch
-        // privacy check and every marker is a request on stdin (one JSON line)
-        // answered on stdout (one JSON line, echoing the request id), so
-        // nothing starts a process or unlocks the database per look.
-        // Requests: {"id":1,"op":"scan"|"probe"|"mark"|"ping",
-        //            "testMode":"normal", "handle":123, "kind":"...", "at":ms, "detail":"..."}
-        case "scan-serve":
-        {
-            var line = new JsonSerializerOptions(json) { WriteIndented = false };
-            using var input = new StreamReader(Console.OpenStandardInput(), new System.Text.UTF8Encoding(false));
-            using var output = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
-            using var database = OpenDatabase(dataRoot, options);
-            var hostProcessId = HostProcessId(options);
-            var inspector = new ForegroundWindowInspector(hostProcessId);
-            var realAutomation = new UiAutomationService();
-            var inertAutomation = new InertAutomation();
-            var realFrames = new WindowsGraphicsCaptureService(options.ContainsKey("software-device"));
-            var noFrames = new DisabledFrameCapture();
-            var gate = new PrivacyGate();
-            var redactor = new DeterministicRedactor();
-            while (true)
-            {
-                var requestLine = await input.ReadLineAsync();
-                if (requestLine is null)
-                {
-                    break; // the host closed the pipe (Glint exited)
-                }
-
-                if (string.IsNullOrWhiteSpace(requestLine))
-                {
-                    continue;
-                }
-
-                long id = 0;
-                try
-                {
-                    using var request = JsonDocument.Parse(requestLine);
-                    var root = request.RootElement;
-                    id = root.TryGetProperty("id", out var idValue) ? idValue.GetInt64() : 0;
-                    var op = root.TryGetProperty("op", out var opValue) ? opValue.GetString() : null;
-                    var testMode = root.TryGetProperty("testMode", out var modeValue) ? modeValue.GetString() : null;
-                    Environment.SetEnvironmentVariable(
-                        StutterTestMode.EnvironmentVariable,
-                        string.IsNullOrWhiteSpace(testMode) || testMode == "normal" ? null : testMode);
-                    IUiAutomationService automation = StutterTestMode.AccessibilityOff ? inertAutomation : realAutomation;
-                    object result;
-                    switch (op)
-                    {
-                        case "scan":
-                        {
-                            var coordinator = new ActivityScanCoordinator(
-                                inspector,
-                                automation,
-                                (IPageReader)automation,
-                                gate,
-                                StutterTestMode.CaptureOff ? noFrames : realFrames,
-                                redactor,
-                                database);
-                            result = await coordinator.ScanAsync();
-                            break;
-                        }
-
-                        case "probe":
-                        {
-                            var handle = root.TryGetProperty("handle", out var handleValue) ? handleValue.GetInt64() : 0;
-                            var window = handle == 0 ? inspector.Inspect() : inspector.Inspect(new nint(handle));
-                            var security = window is null ? null : automation.ProbeSecurity(window);
-                            var decision = window is null
-                                ? PrivacyDecision.Suppress(SuppressReason.NoForegroundWindow, "Windows did not report a foreground window")
-                                : gate.Evaluate(window, security ?? new(false, false, false, "UI Automation unavailable"));
-                            result = new { window, automation = security, decision };
-                            break;
-                        }
-
-                        case "mark":
-                        {
-                            var kind = root.GetProperty("kind").GetString()
-                                ?? throw new InvalidDataException("A mark needs a kind.");
-                            var at = root.TryGetProperty("at", out var atValue) && atValue.ValueKind == JsonValueKind.Number
-                                ? atValue.GetInt64()
-                                : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                            var detail = root.TryGetProperty("detail", out var detailValue) ? detailValue.GetString() : null;
-                            database.RecordMarker(kind, at, detail);
-                            result = new { kind, atMilliseconds = at, detail };
-                            break;
-                        }
-
-                        case "ping":
-                            result = new { ok = true, processId = Environment.ProcessId };
-                            break;
-
-                        default:
-                            throw new InvalidDataException($"Unknown request: {op}.");
-                    }
-
-                    await output.WriteLineAsync(JsonSerializer.Serialize(new { id, result }, line));
-                }
-                catch (Exception error)
-                {
-                    await output.WriteLineAsync(JsonSerializer.Serialize(new { id, error = $"{error.GetType().Name}: {error.Message}" }, line));
-                }
-            }
-
-            break;
-        }
-
-        // Diagnostics: recording and presence markers in a time range.
-        case "markers":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var to = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var from = long.TryParse(options.GetValueOrDefault("since"), out var since)
-                ? since
-                : to - 86_400_000;
-            WriteJson(new { markers = database.GetMarkers(from, to) }, json);
-            break;
-        }
-
-        // Diagnostics: what Windows reports as playing.
         case "media-sessions":
         {
             WriteJson(new { sessions = new WindowsMediaSessionReader().Read() }, json);
@@ -724,20 +342,6 @@ try
         {
             var resolution = LiteRtRuntimeLocator.Resolve(AppContext.BaseDirectory, dataRoot);
             WriteJson(resolution, json);
-            break;
-        }
-
-        case "search-context":
-        {
-            var query = options.GetValueOrDefault("query")
-                ?? throw new ArgumentException("search-context requires --query <text>.");
-            var limit = int.TryParse(options.GetValueOrDefault("limit"), out var parsedLimit)
-                ? parsedLimit
-                : 30;
-            using var database = OpenDatabase(dataRoot, options);
-            WriteJson(
-                new { query, results = database.SearchContext(query, limit) },
-                json);
             break;
         }
 
@@ -783,264 +387,6 @@ try
             break;
         }
 
-        // The user's own verdict on a session. Absolute: no rule overwrites it.
-        case "session-outcome":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var sessionId = RequireOption(options, "id");
-            var requested = RequireOption(options, "outcome");
-            if (!Enum.TryParse<SessionOutcome>(requested, ignoreCase: true, out var outcome))
-            {
-                throw new ArgumentException(
-                    $"--outcome must be one of: {string.Join(", ", Enum.GetNames<SessionOutcome>())}.");
-            }
-
-            var decidedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            database.SetSessionOutcome(sessionId, outcome, decidedAt);
-            WriteJson(
-                new { id = sessionId, outcome = outcome.ToString(), decidedAtMilliseconds = decidedAt },
-                json);
-            break;
-        }
-
-        // Records that the user went away or came back, or that recording
-        // started or stopped. The sessionizer uses these to tell a real break
-        // from a screen that simply did not change.
-        case "mark":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var kind = RequireOption(options, "kind");
-            var at = long.TryParse(options.GetValueOrDefault("at"), out var parsedAt)
-                ? parsedAt
-                : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var detail = options.GetValueOrDefault("detail");
-            database.RecordMarker(kind, at, detail);
-            WriteJson(new { kind, atMilliseconds = at, detail }, json);
-            break;
-        }
-
-        // At startup: close a recording a crash or shutdown left open, and
-        // report whether anything is waiting to be grouped or summarized.
-        case "recover":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var recovery = database.RecoverUnfinishedRun(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-            WriteJson(recovery, json);
-            break;
-        }
-
-        // Sessions, newest first, with their summaries. The UI shows these
-        // rather than per-capture rows.
-        case "sessions":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var sessionLimit = int.TryParse(options.GetValueOrDefault("limit"), out var parsedLimit)
-                ? Math.Clamp(parsedLimit, 1, 200)
-                : 50;
-            WriteJson(new { sessions = database.GetRecentSessions(sessionLimit) }, json);
-            break;
-        }
-
-        // Groups ungrouped captures into sessions and summarizes them: one
-        // model call per session rather than one per capture. Safe to run
-        // repeatedly; sessions still in progress are left alone.
-        case "sessionize":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-                + (options.ContainsKey("seal-open") ? Sessionizer.QuietTailMilliseconds : 0);
-
-            // Sealing sessions and separating activities need no model, so
-            // they run even before the local AI runtime is installed. Only
-            // reading activities wait for it.
-            var sessionBuilder = new SessionBuilder(
-                database,
-                new NoSessionSummaries(),
-                summarizeSessions: false);
-            var sealedResult = await sessionBuilder.RunAsync(now);
-
-            var resolution = LiteRtRuntimeLocator.Resolve(AppContext.BaseDirectory, dataRoot);
-            var maxNarrations = int.TryParse(options.GetValueOrDefault("max-summaries"), out var parsedMax)
-                ? Math.Clamp(parsedMax, 0, 100)
-                : 8;
-            var startsBefore = LiteRtWorkerMetrics.StartCount;
-            ActivityBuildResult activities;
-            var earlyNarrated = 0;
-            string? backendUsed = null;
-            if (resolution.IsReady && maxNarrations > 0)
-            {
-                // One worker for every summary in this run, so the model loads
-                // once no matter how many activities are described.
-                using var worker = new PersistentLiteRtWorker(
-                    resolution.PythonExecutable!,
-                    resolution.WorkerScript!,
-                    resolution.ModelPath!,
-                    maxNumTokens: 4096,
-                    idleUnloadAfter: Timeout.InfiniteTimeSpan);
-                var builder = new ActivityBuilder(
-                    database,
-                    database,
-                    new LiteRtActivityNarrator(worker),
-                    maxNarrations);
-                activities = await builder.RunAsync();
-                // While recording: also summarize activities of the sitting in
-                // progress that have already ended (closed, or moved on from).
-                if (options.ContainsKey("ended"))
-                {
-                    earlyNarrated = await builder.NarrateEndedAsync(
-                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                        Math.Max(0, maxNarrations - activities.Narrated));
-                }
-
-                backendUsed = LiteRtWorkerMetrics.StartCount > startsBefore ? worker.Backend : null;
-            }
-            else
-            {
-                activities = await new ActivityBuilder(database, database, null).RunAsync();
-            }
-
-            WriteJson(
-                new
-                {
-                    sealedResult.Sealed,
-                    // Hosts loop while this is above zero: progress means an
-                    // activity was described in this run.
-                    summarized = activities.Narrated,
-                    earlyNarrated,
-                    failed = activities.NarrationFailed,
-                    sealedResult.Decided,
-                    sealedResult.Threaded,
-                    activities = activities.Activities,
-                    sessionsBuilt = activities.SessionsProcessed,
-                    verified = activities.Verified,
-                    partial = activities.Partial,
-                    fallback = activities.Fallback,
-                    runtimeReady = resolution.IsReady,
-                    workerStarts = LiteRtWorkerMetrics.StartCount - startsBefore,
-                    // Which processor the model ran on, and why not the GPU if it fell back.
-                    aiBackend = backendUsed,
-                    gpuFailure = LiteRtBackend.GpuFailure
-                },
-                json);
-            break;
-        }
-
-        // Activities, newest first: the unit the timeline and Activity page show.
-        case "activities":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var limit = int.TryParse(options.GetValueOrDefault("limit"), out var parsedLimit)
-                ? Math.Clamp(parsedLimit, 1, 1000)
-                : 200;
-            WriteJson(new { activities = database.GetRecentActivities(limit) }, json);
-            break;
-        }
-
-        // Time per activity inside [from, to) for the dashboard chart: stored
-        // activities plus what is being recorded right now. Slim rows only:
-        // no summaries, tasks or captured text.
-        case "usage":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var from = long.Parse(RequireOption(options, "from"), System.Globalization.CultureInfo.InvariantCulture);
-            var to = long.Parse(RequireOption(options, "to"), System.Globalization.CultureInfo.InvariantCulture);
-            if (to <= from)
-            {
-                throw new ArgumentException("--to must be after --from.");
-            }
-
-            var source = new DatabaseAskSource(database);
-            var stored = source.GetActivitiesBetween(from, to);
-            var live = source.GetLiveActivities()
-                .Where(activity => activity.StartedAtMilliseconds < to
-                    && Math.Max(activity.EndedAtMilliseconds, activity.StartedAtMilliseconds + 1) > from)
-                .Where(activity => !stored.Any(existing => existing.Key == activity.Key
-                    && existing.StartedAtMilliseconds == activity.StartedAtMilliseconds));
-            var rows = stored.Concat(live)
-                .Select(activity => new
-                {
-                    id = activity.Id,
-                    app = activity.App,
-                    site = activity.Site,
-                    label = string.IsNullOrWhiteSpace(activity.Label) ? activity.Subject : activity.Label,
-                    subject = activity.Subject,
-                    mode = activity.Mode.ToString(),
-                    category = activity.Category.ToString(),
-                    startedAtMilliseconds = activity.StartedAtMilliseconds,
-                    endedAtMilliseconds = activity.EndedAtMilliseconds,
-                    segments = (activity.Segments.Count > 0
-                            ? activity.Segments
-                            : [new ActivitySegment(activity.StartedAtMilliseconds, activity.EndedAtMilliseconds)])
-                        .Select(segment => new[] { segment.StartMilliseconds, segment.EndMilliseconds })
-                        .ToList()
-                })
-                .ToList();
-            WriteJson(new { from, to, activities = rows }, json);
-            break;
-        }
-
-        // The user's verdict on an activity's task. Absolute: no rule rewrites it.
-        case "activity-task":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var id = RequireOption(options, "id");
-            var requested = RequireOption(options, "status");
-            if (!Enum.TryParse<ActivityTaskStatus>(requested, ignoreCase: true, out var status))
-            {
-                throw new ArgumentException(
-                    $"--status must be one of: {string.Join(", ", Enum.GetNames<ActivityTaskStatus>())}.");
-            }
-
-            var updated = database.SetActivityTaskStatus(id, status)
-                ?? throw new ArgumentException($"No activity {id}.");
-            WriteJson(new { activity = updated }, json);
-            break;
-        }
-
-        // How Glint treats an app or site: Read, Make, Play, Watch or Private.
-        // The user's choice wins over the catalog and over learning.
-        case "app-mode":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            var key = RequireOption(options, "key");
-            if (!key.StartsWith("app:", StringComparison.Ordinal) && !key.StartsWith("site:", StringComparison.Ordinal))
-            {
-                throw new ArgumentException("--key must start with app: or site:.");
-            }
-
-            if (!Enum.TryParse<ActivityMode>(RequireOption(options, "mode"), ignoreCase: true, out var mode))
-            {
-                throw new ArgumentException(
-                    $"--mode must be one of: {string.Join(", ", Enum.GetNames<ActivityMode>())}.");
-            }
-
-            ActivityCategory? category = null;
-            if (options.TryGetValue("category", out var categoryText))
-            {
-                category = Enum.TryParse<ActivityCategory>(categoryText, ignoreCase: true, out var parsedCategory)
-                    ? parsedCategory
-                    : throw new ArgumentException(
-                        $"--category must be one of: {string.Join(", ", Enum.GetNames<ActivityCategory>())}.");
-            }
-
-            var profile = database.SetAppModeByUser(
-                key,
-                mode,
-                category,
-                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-            WriteJson(new { profile }, json);
-            break;
-        }
-
-        case "app-profiles":
-        {
-            using var database = OpenDatabase(dataRoot, options);
-            WriteJson(new { profiles = database.GetAppProfiles() }, json);
-            break;
-        }
-
-        // Exercises the persistent worker: N generations through one process,
-        // so worker starts should be 1 regardless of the run count.
         case "worker-bench":
         {
             var resolution = LiteRtRuntimeLocator.Resolve(AppContext.BaseDirectory, dataRoot);
@@ -1185,34 +531,23 @@ try
                 Glint Windows Phase 0
 
                 Commands:
+                  serve [--data-dir PATH] [--host-pid PID] [--sqlite-vec PATH]
+                        Glint's backend: the only process that opens the store.
+                        JSON lines on stdin/stdout, e.g. {"id":1,"op":"activities"}.
+                        Ops: scan probe focus mark activities sessions usage history
+                             timeline search storage app-profiles app-mode activity-task
+                             session-outcome chat-* ask ai-backend runtime-status summarize
                   compatibility [--require-ready]
                   probe [--delay 3]
                   request-borderless
                   capture [--delay 3] [--handle HWND] [--software-device]
                           [--compatibility-known-safe]
-                  pipeline [--delay 3] [--data-dir PATH] [--sqlite-vec PATH]
-                  storage [--data-dir PATH] [--sqlite-vec PATH]
-                  search --query TEXT [--data-dir PATH]
-                  vector-smoke [--data-dir PATH]
-                  manual-history [--limit 50] [--data-dir PATH]
-                  manual-scan [--delay 3] [--software-device] [--data-dir PATH] [--sqlite-vec PATH]
+                  page-probe --process NAME
+                  stutter-probe --process NAME
+                  media-sessions
                   runtime-status [--data-dir PATH]
-                  search-context --query TEXT [--limit 30] [--data-dir PATH]
                   model-probe --runtime PATH --model PATH
                   model-generate --python PATH --worker PATH --model PATH --prompt TEXT [--backend cpu] [--temperature 0] [--seed 1]
-                  session-outcome --id ID --outcome open|settled|unknown [--data-dir PATH]
-                  mark --kind run.started|run.stopped|user.away|user.returned|user.locked|user.unlocked|system.sleep|system.resumed|system.shutdown|app.closed [--at MS] [--detail APP]
-                  recover [--data-dir PATH]
-                  sessions [--limit 50] [--data-dir PATH] [--sqlite-vec PATH]
-                  sessionize [--max-summaries 8] [--seal-open] [--ended] [--data-dir PATH] [--sqlite-vec PATH]
-                  activities [--limit 200] [--data-dir PATH]
-                  usage --from MS --to MS [--data-dir PATH]
-                  activity-task --id ID --status Open|LooksDone|Done|None [--data-dir PATH]
-                  app-mode --key app:NAME|site:HOST --mode Read|Make|Play|Watch|Private [--category NAME]
-                  app-profiles [--data-dir PATH]
-                  ask --question TEXT [--scope day|week|all] [--day YYYY-MM-DD] [--no-model]
-                  ask-serve [--data-dir PATH]   (JSON lines on stdin/stdout)
-                  scan-serve [--data-dir PATH] [--host-pid PID]   (capture worker: JSON lines on stdin/stdout)
                   worker-bench [--runs 3] [--prompt TEXT] [--max-tokens 4096] [--data-dir PATH]
                   activity-summarize --text TEXT [--process NAME] [--title TITLE]
                   model-install --manifest PATH [--data-dir PATH]
@@ -1223,7 +558,7 @@ try
                   model-remove-version --model-id ID --version VERSION [--data-dir PATH]
 
                 --host-pid PID treats that process's windows as Glint itself
-                (probe, capture, pipeline, manual-scan); hosts pass their own PID.
+                (serve, probe, capture); hosts pass their own PID.
                 --compatibility-known-safe is only for the shipped non-sensitive test fixture.
                 Capture commands never write image pixels to disk.
                 """);
@@ -1239,23 +574,6 @@ catch (Exception error)
             ? error
             : $"{error.GetType().Name}: {error.Message}");
     return 1;
-}
-
-static Phase0Database OpenDatabase(
-    string dataRoot,
-    IReadOnlyDictionary<string, string> options)
-{
-    var keyStore = new DpapiKeyStore(Path.Combine(dataRoot, "secrets", "dbkey.bin"));
-    var bundledVec = Path.Combine(
-        AppContext.BaseDirectory,
-        "runtimes",
-        "win-x64",
-        "native",
-        "vec0.dll");
-    var vec = options.GetValueOrDefault(
-        "sqlite-vec",
-        File.Exists(bundledVec) ? bundledVec : string.Empty);
-    return Phase0Database.Open(Path.Combine(dataRoot, "memory.db"), keyStore, vec);
 }
 
 // --host-pid names the long-lived UI process (the Tauri host) so its windows
@@ -1348,23 +666,6 @@ static async Task<ModelArtifactManifest> ReadModelManifestAsync(
 
 static void WriteJson<T>(T value, JsonSerializerOptions options) =>
     Console.WriteLine(JsonSerializer.Serialize(value, options));
-
-/// <summary>
-/// Stands in for the per-session summarizer, which sessionize no longer
-/// calls: activities are described one at a time instead.
-/// </summary>
-sealed class NoSessionSummaries : IActivitySummarizer
-{
-    public string ModelId => "none";
-
-    public Task<ActivitySummary> SummarizeAsync(
-        DateTimeOffset capturedAt,
-        string processName,
-        string windowTitle,
-        string redactedText,
-        CancellationToken cancellationToken = default) =>
-        throw new InvalidOperationException("Sessions are described per activity.");
-}
 
 /// Pings a window's UI thread (WM_NULL through SendMessageTimeout) every
 /// 10 ms on a background thread and records how long each answer took.

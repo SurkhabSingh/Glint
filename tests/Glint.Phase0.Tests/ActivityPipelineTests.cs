@@ -41,6 +41,16 @@ public sealed class ActivityPipelineTests : IDisposable
             () => _idle,
             _media);
 
+    /// Sessions and activities as the screens see them now.
+    private ActivitySnapshot Snapshot() =>
+        new ActivityView(_database, () => _now).Build(T0 - 86_400_000, _now + 86_400_000);
+
+    private IReadOnlyList<ActivityRecord> Activities() => Snapshot().Activities;
+
+    /// One pass of the summaries written while the user is idle.
+    private Task<SummaryRunResult> Summarize(IActivityNarrator narrator) =>
+        SummaryQueue.RunAsync(_database, summary => _database.SaveSummary(summary, _now), narrator, _now, 8);
+
     [Fact]
     public async Task ALivePageIsStoredOnceThenOnlyWhatIsNew()
     {
@@ -50,7 +60,8 @@ public sealed class ActivityPipelineTests : IDisposable
         var coordinator = Coordinator();
 
         var first = await coordinator.ScanAsync();
-        Assert.Equal(CaptureChange.Keyframe, first.Change);
+        Assert.Equal(CaptureChange.Delta, first.Change);
+        Assert.StartsWith("New page", first.Detail, StringComparison.Ordinal);
 
         // Nothing moved on screen: not even read.
         _now += 2_500;
@@ -74,7 +85,7 @@ public sealed class ActivityPipelineTests : IDisposable
         var posted = await coordinator.ScanAsync();
         Assert.Equal(CaptureChange.Delta, posted.Change);
 
-        var scans = _database.GetRecentManualScans(50);
+        var scans = _database.GetRecentLooks(50);
         Assert.Equal(2, scans.Count);
         var delta = scans[0];
         Assert.Equal("You: What a comeback!", delta.RedactedInputText);
@@ -92,7 +103,7 @@ public sealed class ActivityPipelineTests : IDisposable
         var outcome = await Coordinator().ScanAsync();
 
         Assert.Equal(ActivityMode.Private, outcome.Mode);
-        var scan = Assert.Single(_database.GetRecentManualScans(10));
+        var scan = Assert.Single(_database.GetRecentLooks(10));
         Assert.Null(scan.RedactedInputText);
         Assert.Equal("confirmed", scan.EventKind);
     }
@@ -118,7 +129,7 @@ public sealed class ActivityPipelineTests : IDisposable
         Assert.Equal(0, _pages.Probes);
         Assert.Equal(0, _frames.Recognitions);
         Assert.Equal(2, _frames.Captures);
-        var scan = Assert.Single(_database.GetRecentManualScans(10));
+        var scan = Assert.Single(_database.GetRecentLooks(10));
         Assert.Equal(T0 + 10_000 + ActivityScanCoordinator.VisualLookEveryMilliseconds, scan.LastSeenMilliseconds);
     }
 
@@ -130,7 +141,7 @@ public sealed class ActivityPipelineTests : IDisposable
         var outcome = await Coordinator().ScanAsync();
 
         Assert.Equal(ManualScanOutcomeKind.Suppressed, outcome.Kind);
-        var scan = Assert.Single(_database.GetRecentManualScans(10));
+        var scan = Assert.Single(_database.GetRecentLooks(10));
         Assert.Equal(string.Empty, scan.WindowTitle);
         Assert.Equal(ActivityMode.Private, scan.Mode);
         Assert.False(_automation.TextWasRead);
@@ -147,7 +158,7 @@ public sealed class ActivityPipelineTests : IDisposable
         var outcome = await Coordinator().ScanAsync();
 
         Assert.Equal(ActivityMode.Private, outcome.Mode);
-        var scan = Assert.Single(_database.GetRecentManualScans(10));
+        var scan = Assert.Single(_database.GetRecentLooks(10));
         Assert.Null(scan.RedactedInputText);
         Assert.Equal(string.Empty, scan.WindowTitle);
         Assert.Equal("confirmed", scan.EventKind);
@@ -161,7 +172,7 @@ public sealed class ActivityPipelineTests : IDisposable
 
         await Coordinator().ScanAsync();
 
-        var scan = Assert.Single(_database.GetRecentManualScans(10));
+        var scan = Assert.Single(_database.GetRecentLooks(10));
         Assert.DoesNotContain("bob@example.com", scan.WindowTitle, StringComparison.Ordinal);
         Assert.DoesNotContain("bob@example.com", scan.PageKey!, StringComparison.Ordinal);
         Assert.DoesNotContain("bob@example.com", scan.Phase ?? string.Empty, StringComparison.Ordinal);
@@ -208,17 +219,17 @@ public sealed class ActivityPipelineTests : IDisposable
         _now += 1_200_000;
         await coordinator.ScanAsync();
 
-        var sessions = new SessionBuilder(_database, new UnusedSummarizer(), summarizeSessions: false);
-        await sessions.RunAsync(_now + Sessionizer.QuietTailMilliseconds);
+        // The sitting has been quiet long enough to be over.
+        _now += Sessionizer.QuietTailMilliseconds;
         var narrator = new FakeNarrator(new Narration(
             "Replied to Priya about deposit",
             "Priya Sharma asked for the deposit receipt by Friday. The user said they would send it tonight. Arjun approved the budget.",
             "Send Priya the deposit receipt by Friday"));
-        var result = await new ActivityBuilder(_database, _database, narrator).RunAsync();
+        var result = await Summarize(narrator);
 
-        Assert.Equal(2, result.Activities);
-        Assert.Equal(1, result.Narrated);
-        var activities = _database.GetRecentActivities();
+        Assert.Equal(1, result.Summarized);
+        var activities = Activities();
+        Assert.Equal(2, activities.Count);
         var email = Assert.Single(activities, activity => activity.Category == ActivityCategory.Email);
         Assert.Equal(SummaryCheck.Partial, email.Check);
         Assert.DoesNotContain("Arjun", email.Summary, StringComparison.Ordinal);
@@ -230,17 +241,20 @@ public sealed class ActivityPipelineTests : IDisposable
         Assert.Equal(SummaryCheck.Rule, game.Check);
         Assert.Equal("Played osu!", game.Label);
 
-        var session = Assert.Single(_database.GetRecentSessions(10));
+        var session = Assert.Single(Snapshot().Sessions);
         Assert.Equal(SessionOutcome.Open, session.Outcome);
         Assert.Contains("Played osu!", session.Summary, StringComparison.Ordinal);
 
-        // The user's verdict survives a rebuild.
-        _database.SetActivityTaskStatus(email.Id, ActivityTaskStatus.Done);
+        // The user's verdict and a mode correction apply as soon as they are
+        // given, and the summary already paid for stays.
+        _database.SetActivityTaskStatus(email.Id, ActivityTaskStatus.Done, _now);
         _database.SetAppModeByUser(ActivityIdentityResolver.AppKeyOf("osu!"), ActivityMode.Play, ActivityCategory.Game, _now);
-        await new ActivityBuilder(_database, _database, narrator).RunAsync();
-        var rebuilt = Assert.Single(_database.GetRecentActivities(), activity => activity.Category == ActivityCategory.Email);
+        var rebuilt = Assert.Single(Activities(), activity => activity.Category == ActivityCategory.Email);
+        Assert.Equal(email.Id, rebuilt.Id);
         Assert.Equal(ActivityTaskStatus.Done, rebuilt.TaskStatus);
         Assert.Equal(SummaryCheck.Partial, rebuilt.Check);
+        Assert.Equal(0, (await Summarize(narrator)).Summarized);
+        Assert.Equal(1, narrator.Calls);
     }
 
     [Fact]
@@ -264,32 +278,29 @@ public sealed class ActivityPipelineTests : IDisposable
             "Replied to Priya about deposit",
             "Priya Sharma asked for the deposit receipt by Friday. The user said they would send it tonight.",
             "Send Priya the deposit receipt by Friday"));
-        var builder = new ActivityBuilder(_database, _database, narrator);
 
         // Two minutes into the game the email could still be resumed: not yet.
         _now += 120_000;
         await coordinator.ScanAsync();
-        Assert.Equal(0, await builder.NarrateEndedAsync(_now, 8));
+        Assert.Equal(0, (await Summarize(narrator)).Summarized);
+        Assert.Equal(SummaryCheck.Pending, Assert.Single(Activities(), activity => activity.Category == ActivityCategory.Email).Check);
 
-        // Ten minutes in, the email is over: summarized while still recording.
+        // Ten minutes in, the email is over: summarized while still recording,
+        // and once only.
         _now += 480_000;
         await coordinator.ScanAsync();
-        Assert.Equal(1, await builder.NarrateEndedAsync(_now, 8));
-        Assert.Equal(0, await builder.NarrateEndedAsync(_now, 8));
+        Assert.Equal(1, (await Summarize(narrator)).Summarized);
+        Assert.Equal(0, (await Summarize(narrator)).Summarized);
         Assert.Equal(1, narrator.Calls);
-        Assert.Empty(_database.GetRecentActivities());
 
-        // Stopping seals the sitting; the summary is already there.
+        // Stopping changes nothing about it: the summary is already there.
         _database.RecordMarker("run.stopped", _now);
-        await new SessionBuilder(_database, new UnusedSummarizer(), summarizeSessions: false)
-            .RunAsync(_now + Sessionizer.QuietTailMilliseconds);
-        var result = await builder.RunAsync();
-
-        Assert.Equal(0, result.Narrated);
+        Assert.Equal(0, (await Summarize(narrator)).Summarized);
         Assert.Equal(1, narrator.Calls);
-        var email = Assert.Single(_database.GetRecentActivities(), activity => activity.Category == ActivityCategory.Email);
+        var email = Assert.Single(Activities(), activity => activity.Category == ActivityCategory.Email);
         Assert.Equal(SummaryCheck.Verified, email.Check);
         Assert.Equal("Send Priya the deposit receipt by Friday", email.Task);
+        Assert.Equal(ActivityTaskStatus.Open, email.TaskStatus);
     }
 
     [Fact]
@@ -315,7 +326,7 @@ public sealed class ActivityPipelineTests : IDisposable
             "Replied to Priya about deposit",
             "Priya Sharma asked for the deposit receipt by Friday.",
             null));
-        Assert.Equal(1, await new ActivityBuilder(_database, _database, narrator).NarrateEndedAsync(_now, 8));
+        Assert.Equal(1, (await Summarize(narrator)).Summarized);
     }
 
     [Fact]
@@ -329,13 +340,13 @@ public sealed class ActivityPipelineTests : IDisposable
         await coordinator.ScanAsync();
 
         // The PC crashed here; Glint starts again an hour later.
-        var recovery = _database.RecoverUnfinishedRun(_now + 3_600_000);
-
-        Assert.True(recovery.ClosedRun);
-        Assert.Equal(_now, recovery.ClosedAtMilliseconds);
-        Assert.True(recovery.Pending > 0);
+        Assert.Equal(_now, _database.CloseUnfinishedRun(_now + 3_600_000));
         Assert.Contains(_database.GetMarkers(T0, _now + 1), marker => marker.Kind == "run.stopped");
-        Assert.False(_database.RecoverUnfinishedRun(_now + 3_700_000).ClosedRun);
+        Assert.Null(_database.CloseUnfinishedRun(_now + 3_700_000));
+
+        // Nothing else to repair: the game is there, worked out from its looks.
+        var game = Assert.Single(Activities());
+        Assert.Equal(ActivityMode.Play, game.Mode);
     }
 
     [Fact]
@@ -364,7 +375,7 @@ public sealed class ActivityPipelineTests : IDisposable
         Assert.All(outcomes, outcome => Assert.Equal(ActivityMode.Watch, outcome.Mode));
         Assert.Equal(0, _pages.Reads);
         Assert.Equal(0, _frames.Recognitions);
-        var scan = Assert.Single(_database.GetRecentManualScans(50));
+        var scan = Assert.Single(_database.GetRecentLooks(50));
         Assert.Equal(ActivityMode.Watch, scan.Mode);
         Assert.Equal(ActivityCategory.Video, scan.Category);
         Assert.Null(scan.RedactedInputText);
@@ -394,7 +405,7 @@ public sealed class ActivityPipelineTests : IDisposable
         // Read until the motion has lasted a couple of looks, then Watch.
         Assert.Equal(ActivityMode.Watch, modes[^1]);
         Assert.Equal(ActivityMode.Watch, modes[^2]);
-        var stored = _database.GetRecentManualScans(50);
+        var stored = _database.GetRecentLooks(50);
         Assert.True(stored.Count <= 3, $"stored {stored.Count} looks");
     }
 
@@ -409,7 +420,7 @@ public sealed class ActivityPipelineTests : IDisposable
         var outcome = await Coordinator().ScanAsync();
 
         Assert.Equal(ActivityMode.Read, outcome.Mode);
-        Assert.Equal(CaptureChange.Keyframe, outcome.Change);
+        Assert.Equal(CaptureChange.Delta, outcome.Change);
     }
 
     [Fact]
@@ -428,11 +439,7 @@ public sealed class ActivityPipelineTests : IDisposable
         _now += 1_200_000;
         await coordinator.ScanAsync();
 
-        await new SessionBuilder(_database, new UnusedSummarizer(), summarizeSessions: false)
-            .RunAsync(_now + Sessionizer.QuietTailMilliseconds);
-        await new ActivityBuilder(_database, _database, null).RunAsync();
-
-        var activity = Assert.Single(_database.GetRecentActivities());
+        var activity = Assert.Single(Activities());
         Assert.Equal(ActivityMode.Watch, activity.Mode);
         Assert.Equal(ActivityCategory.Video, activity.Category);
         Assert.Equal(SummaryCheck.Rule, activity.Check);
@@ -440,7 +447,7 @@ public sealed class ActivityPipelineTests : IDisposable
     }
 
     [Fact]
-    public async Task PausingAndResumingOnTheSameEpisodeNeverExtendsASealedRecord()
+    public async Task PausingAndResumingOnTheSameEpisodeNeverExtendsARecordAcrossTheStop()
     {
         // The reported case: watch, pause at 16:51, resume at 16:52 on the
         // same episode, keep watching past 17:00, stop at 17:11.
@@ -452,9 +459,6 @@ public sealed class ActivityPipelineTests : IDisposable
 
         await coordinator.ScanAsync();                       // 16:51:03
         _database.RecordMarker("run.stopped", _now + 3_000); // paused
-        await new SessionBuilder(_database, new UnusedSummarizer(), summarizeSessions: false)
-            .RunAsync(_now + 3_000 + Sessionizer.QuietTailMilliseconds);
-        await new ActivityBuilder(_database, _database, null).RunAsync();
 
         _now += 71_000;                                      // resumed 16:52:14
         _database.RecordMarker("run.started", _now);
@@ -464,23 +468,22 @@ public sealed class ActivityPipelineTests : IDisposable
             _now += 60_000;
         }
 
-        var scans = _database.GetRecentManualScans(50);
+        var scans = _database.GetRecentLooks(50);
         Assert.Equal(2, scans.Count);
-        // The sealed record kept its own end; the new one carries the evening.
+        // The record before the stop kept its own end; the new one carries the evening.
         Assert.InRange(scans[1].LastSeenMilliseconds ?? 0, T0, T0 + 5_000);
         Assert.True(scans[0].LastSeenMilliseconds - scans[0].CapturedAtMilliseconds >= 17 * 60_000);
 
         _database.RecordMarker("run.stopped", _now);
-        await new SessionBuilder(_database, new UnusedSummarizer(), summarizeSessions: false)
-            .RunAsync(_now + Sessionizer.QuietTailMilliseconds);
-        await new ActivityBuilder(_database, _database, null).RunAsync();
 
-        var later = _database.GetRecentActivities().OrderBy(activity => activity.StartedAtMilliseconds).Last();
+        var later = Activities().OrderBy(activity => activity.StartedAtMilliseconds).Last();
         Assert.Equal(ActivityMode.Watch, later.Mode);
         Assert.Equal(ActivityCategory.Video, later.Category);
         Assert.True(later.ActiveMilliseconds >= 18 * 60_000, $"{later.ActiveMilliseconds} ms");
-        var session = _database.GetRecentSessions(5).First();
-        Assert.Equal(later.EndedAtMilliseconds, session.EndedAtMilliseconds);
+        // The stop ended the first sitting: two sessions.
+        var sessions = Snapshot().Sessions.OrderByDescending(session => session.StartedAtMilliseconds).ToList();
+        Assert.Equal(2, sessions.Count);
+        Assert.Equal(later.EndedAtMilliseconds, sessions[0].EndedAtMilliseconds);
     }
 
     [Fact]
@@ -493,7 +496,7 @@ public sealed class ActivityPipelineTests : IDisposable
         _now += 600_000; // the app was closed, or the machine slept
         await coordinator.ScanAsync();
 
-        var scans = _database.GetRecentManualScans(10);
+        var scans = _database.GetRecentLooks(10);
         Assert.Equal(2, scans.Count);
         Assert.Equal(T0, scans[1].LastSeenMilliseconds);
     }
@@ -518,7 +521,7 @@ public sealed class ActivityPipelineTests : IDisposable
         Assert.Equal(0, _frames.Captures);
         Assert.Equal(0, _pages.Probes);
         Assert.False(_automation.TextWasRead);
-        var scan = Assert.Single(_database.GetRecentManualScans(10));
+        var scan = Assert.Single(_database.GetRecentLooks(10));
         Assert.Equal("P4G", scan.WindowTitle);
         Assert.Equal(T0 + 30_000, scan.LastSeenMilliseconds);
     }
@@ -541,11 +544,7 @@ public sealed class ActivityPipelineTests : IDisposable
         _now += 600_000;
         await coordinator.ScanAsync();
 
-        await new SessionBuilder(_database, new UnusedSummarizer(), summarizeSessions: false)
-            .RunAsync(_now + Sessionizer.QuietTailMilliseconds);
-        await new ActivityBuilder(_database, _database, null).RunAsync();
-
-        var game = Assert.Single(_database.GetRecentActivities());
+        var game = Assert.Single(Activities());
         Assert.Equal(ActivityMode.Play, game.Mode);
         Assert.Equal(ActivityCategory.Game, game.Category);
     }
@@ -567,49 +566,65 @@ public sealed class ActivityPipelineTests : IDisposable
     }
 
     [Fact]
-    public async Task OldCapturesFromAGameFolderAreRecognizedAsPlay()
+    public void OldCapturesFromAGameFolderAreRecognizedAsPlay()
     {
         // Stored by the original coordinator: no facets, only process, title
-        // and the raw event's executable path.
+        // and the executable path.
         foreach (var (offset, title) in new[] { (0L, "Stellar Blade"), (600_000L, "Stellar Blade - Map") })
         {
-            var hash = Guid.NewGuid().ToString("N");
-            _database.SaveManualScan(
-                new RawCaptureEvent(
-                    Guid.NewGuid().ToString("N"),
-                    T0 + offset,
-                    "SB-Win64-Shipping",
-                    @"D:\SteamLibrary\steamapps\common\Stellar Blade\SB-Win64-Shipping.exe",
-                    title,
-                    hash,
-                    "HP 120 Save Load",
-                    0),
-                new ManualScanRecord(
-                    Guid.NewGuid().ToString("N"),
-                    T0 + offset,
-                    "SB-Win64-Shipping",
-                    title,
-                    title,
-                    null,
-                    ManualScanStatus.Completed,
-                    null,
-                    hash,
-                    string.Empty,
-                    0,
-                    16,
-                    0,
-                    0,
-                    0,
-                    0));
+            _database.SaveLook(new ManualScanRecord(
+                Guid.NewGuid().ToString("N"),
+                T0 + offset,
+                "SB-Win64-Shipping",
+                title,
+                title,
+                null,
+                ManualScanStatus.Completed,
+                null,
+                Guid.NewGuid().ToString("N"),
+                string.Empty,
+                0,
+                16,
+                0,
+                0,
+                0,
+                0,
+                ExecutablePath: @"D:\SteamLibrary\steamapps\common\Stellar Blade\SB-Win64-Shipping.exe"));
         }
 
-        await new SessionBuilder(_database, new UnusedSummarizer(), summarizeSessions: false)
-            .RunAsync(T0 + 3_600_000);
-        await new ActivityBuilder(_database, _database, null).RunAsync();
-
-        var game = Assert.Single(_database.GetRecentActivities());
+        _now = T0 + 3_600_000;
+        var game = Assert.Single(Activities());
         Assert.Equal(ActivityMode.Play, game.Mode);
         Assert.Equal(600_000, game.ActiveMilliseconds);
+    }
+
+    [Fact]
+    public async Task AReturnToAnUnchangedPageStillHasItsText()
+    {
+        // Read a page, look elsewhere, come back to it unchanged: the picture
+        // check skips reading it, but its lines are still what is on screen,
+        // so the second visit has text of its own.
+        var coordinator = Coordinator();
+        _inspector.Window = Window("zen", "Design doc - Docs - Zen Browser");
+        _pages.Probe = new PageProbe(true, "docs.example.com", null, null, new object());
+        _pages.Text = "Design doc\nThe backend owns the store and every read goes through it";
+        await coordinator.ScanAsync();
+        _now += 60_000;
+        _inspector.Window = Window("osu!", "osu!", fullscreen: true);
+        await coordinator.ScanAsync();
+        _now += 600_000;
+        _inspector.Window = Window("zen", "Design doc - Docs - Zen Browser");
+        _pages.Reads = 0;
+        var back = await coordinator.ScanAsync();
+        _now += 60_000;
+        await coordinator.ScanAsync();
+
+        Assert.Equal(0, _pages.Reads);
+        Assert.Equal(ManualScanOutcomeKind.Unchanged, back.Kind);
+        var docs = Activities().Where(activity => activity.Category != ActivityCategory.Game).OrderBy(activity => activity.StartedAtMilliseconds).ToList();
+        Assert.Equal(2, docs.Count);
+        var text = ActivityText.Build(ActivityTexts.For(_database, docs[1]));
+        Assert.Contains("The backend owns the store", text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -773,18 +788,5 @@ public sealed class ActivityPipelineTests : IDisposable
             LastText = request.Text;
             return Task.FromResult(narration);
         }
-    }
-
-    private sealed class UnusedSummarizer : IActivitySummarizer
-    {
-        public string ModelId => "unused";
-
-        public Task<ActivitySummary> SummarizeAsync(
-            DateTimeOffset capturedAt,
-            string processName,
-            string windowTitle,
-            string redactedText,
-            CancellationToken cancellationToken = default) =>
-            throw new InvalidOperationException("Sessions are described per activity.");
     }
 }

@@ -255,35 +255,33 @@ public sealed class SessionizerTests
         Assert.Equal(Start + 6_000, session.EndedAtMilliseconds);
     }
 
-    [Theory]
-    [InlineData(new[] { "a", "a", "b" }, "a\n---\nb")]
-    [InlineData(new[] { "a", "a", "a" }, "a")]
-    public void ConsecutiveRepeatsAreDroppedFromTheSummaryText(
-        string[] texts,
-        string expected)
+    [Fact]
+    public void StoppingEndsTheSittingHoweverSoonTheNextOneStarts()
     {
-        Assert.Equal(expected, SessionBuilder.BuildSessionText(texts));
+        const long minute = 60_000;
+        var captures = new List<CaptureRow>
+        {
+            new("before", 0, "Code", "a.cs", 2 * minute),
+            new("after", 3 * minute, "Code", "a.cs", 4 * minute)
+        };
+
+        var drafts = Sessionizer.Group(
+            captures,
+            60 * minute,
+            [new ActivityMarker(2 * minute + 10_000, "run.stopped"), new ActivityMarker(3 * minute - 5_000, "run.started")]);
+
+        Assert.Equal(2, drafts.Count);
     }
 
     [Fact]
-    public void BlankCapturesProduceNoSummaryText()
+    public void TheSittingStillInProgressIsKeptAndFlagged()
     {
-        Assert.Equal(string.Empty, SessionBuilder.BuildSessionText(["", "   "]));
-    }
+        const long minute = 60_000;
+        var captures = new List<CaptureRow> { new("video", 0, "zen", "Episode 3", 30 * minute) };
 
-    [Fact]
-    public void ALongSessionIsSampledAcrossItsSpanAndStaysInBudget()
-    {
-        var texts = Enumerable.Range(0, 200)
-            .Select(index => new string((char)('a' + (index % 26)), 500))
-            .ToList();
+        var draft = Assert.Single(Sessionizer.Group(captures, (30 * minute) + 30_000));
 
-        var built = SessionBuilder.BuildSessionText(texts, budget: 6_000);
-
-        Assert.True(built.Length <= 6_000, $"budget exceeded: {built.Length}");
-        // Sampled across the whole session rather than truncated to its start.
-        Assert.Contains(new string('a', 500), built, StringComparison.Ordinal);
-        Assert.DoesNotContain(new string('b', 500), built, StringComparison.Ordinal);
+        Assert.True(draft.StillOpen);
     }
 
     [Fact]

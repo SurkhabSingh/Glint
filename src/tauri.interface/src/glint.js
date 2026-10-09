@@ -74,8 +74,9 @@ export const glintSessions = (limit = 50) =>
   invoke("glint_sessions", { limit });
 export const glintSetSessionOutcome = (id, outcome) =>
   invoke("glint_set_session_outcome", { id, outcome });
-export const glintActivities = (limit = 300) =>
-  invoke("glint_activities", { limit });
+/** Activities, newest first; `from`/`to` (ms) narrow them to a window, else the last 30 days. */
+export const glintActivities = (limit = 300, from = null, to = null) =>
+  invoke("glint_activities", { limit, from, to });
 export const glintSetActivityTask = (id, status) =>
   invoke("glint_set_activity_task", { id, status });
 export const glintSetAppMode = (key, mode) =>
@@ -139,7 +140,7 @@ const CHECKS = {
   Verified: { text: "Checked against the screen", tone: "verified" },
   Partial: { text: "Partly checked", tone: "partial" },
   Rule: { text: "From what Glint saw", tone: "rule" },
-  Pending: { text: "Summary after scanning stops", tone: "pending" },
+  Pending: { text: "Summary written once you step away", tone: "pending" },
   Fallback: { text: "No summary could be verified", tone: "fallback" },
 };
 
@@ -339,7 +340,7 @@ export function sessionView(session) {
       ? session.summary
       : minor
         ? "Too little on screen to summarize."
-        : "Not summarized yet — summaries run when scanning stops.",
+        : "Not summarized yet — summaries are written once you step away.",
     important: meaningful(session.importantSignals),
     reminder: meaningful(session.reminderCandidate),
     source: session.processName,
